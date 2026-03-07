@@ -79,29 +79,49 @@ class DataManager:
                 raw_hero_list = defaultdict(list)
                 with open(csv_path, 'r', encoding=encoding) as f:
                     reader = csv.reader(f)
-                    next(reader, None) # 跳过表头
+                    header = next(reader, None) # 跳过表头
+                    is_new_format = header and "等级" in header
+                    
                     for row in reader:
-                        if len(row) < 4: continue
+                        if not row: continue
                         hero = row[0].strip()
-                        try: rank = int(row[2])
-                        except: rank = 999
-                        aug = row[3].strip()
-                        raw_hero_list[hero].append((rank, aug))
+                        
+                        if is_new_format and len(row) >= 6:
+                            try: g_rank = int(row[2])
+                            except: g_rank = 999
+                            tier = row[3].strip()
+                            try: t_rank = int(row[4])
+                            except: t_rank = 999
+                            name = row[5].strip()
+                            
+                            if hero not in self.hero_data: self.hero_data[hero] = {}
+                            self.hero_data[hero][name] = {
+                                "g_rank": g_rank,
+                                "tier": tier,
+                                "t_rank": t_rank
+                            }
+                        elif not is_new_format and len(row) >= 4:
+                            try: rank = int(row[2])
+                            except: rank = 999
+                            aug = row[3].strip()
+                            raw_hero_list[hero].append((rank, aug))
                 
-                # 构建查询字典
-                for hero, aug_list in raw_hero_list.items():
-                    aug_list.sort(key=lambda x: x[0])
-                    counters = {"白银": 1, "黄金": 1, "棱彩": 1, "未知": 1}
-                    h_dict = {}
-                    for g_rank, name in aug_list:
-                        tier = self.tier_map.get(name, "未知")
-                        h_dict[name] = {
-                            "g_rank": g_rank, 
-                            "tier": tier, 
-                            "t_rank": counters.get(tier, 1)
-                        }
-                        if tier in counters: counters[tier] += 1
-                    self.hero_data[hero] = h_dict
+                # 如果存在旧格式的数据，走旧的合并逻辑
+                if raw_hero_list:
+                    for hero, aug_list in raw_hero_list.items():
+                        if hero in self.hero_data: continue # 跳过已被新格式处理的
+                        aug_list.sort(key=lambda x: x[0])
+                        counters = {"白银": 1, "黄金": 1, "棱彩": 1, "未知": 1}
+                        h_dict = {}
+                        for g_rank, name in aug_list:
+                            tier = self.tier_map.get(name, "未知")
+                            h_dict[name] = {
+                                "g_rank": g_rank, 
+                                "tier": tier, 
+                                "t_rank": counters.get(tier, 1)
+                            }
+                            if tier in counters: counters[tier] += 1
+                        self.hero_data[hero] = h_dict
                 
                 print(f"✅ 英雄数据加载完毕: 共 {len(self.hero_data)} 个英雄")
             except Exception as e:
@@ -507,10 +527,16 @@ class InputController(threading.Thread):
 # ================= 5. 主入口 =================
 
 def main():
+    import sys
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    
     # 强制设置工作目录为脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     os.system('title ARAM 海克斯助手')
+    os.system('chcp 65001 >nul')
     print(f"Working Directory: {script_dir}")
 
     # 1. 初始化核心数据与逻辑

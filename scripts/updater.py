@@ -23,7 +23,7 @@ CHAMPION_ID_FILE = os.path.join(DATA_DIR, "champions.json")
 PINYIN_FILE      = os.path.join(DATA_DIR, "pinyin_map.json")
 CSV_FILE         = os.path.join(DATA_DIR, "hero_augments.csv")
 TIERS_FILE       = os.path.join(DATA_DIR, "tiers.json") 
-CSV_HEADER       =["中文名", "英文名", "序号", "海克斯名称"]
+CSV_HEADER       =["中文名", "英文名", "全局序号", "等级", "等级内序号", "海克斯名称"]
 
 # ================= 1. 数据真理同步 =================
 def sync_official_data():
@@ -96,12 +96,26 @@ def load_csv_history():
     try:
         with open(CSV_FILE, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
+            is_old_format = reader.fieldnames and "序号" in reader.fieldnames and "等级" not in reader.fieldnames
+            
             for row in reader:
                 en_name = row.get('英文名')
                 if en_name:
                     if en_name not in history:
                         history[en_name] = []
-                    history[en_name].append(row)
+                    
+                    if is_old_format:
+                        adapted_row = {
+                            "中文名": row.get("中文名", ""),
+                            "英文名": en_name,
+                            "全局序号": row.get("序号", 999),
+                            "等级": "未知",
+                            "等级内序号": 999,
+                            "海克斯名称": row.get("海克斯名称", "")
+                        }
+                        history[en_name].append(adapted_row)
+                    else:
+                        history[en_name].append(row)
         print(f"    已加载 {len(history)} 个英雄的历史数据。")
     except Exception as e:
         print(f"⚠️ 读取历史CSV时出错 (可能是空文件): {e}")
@@ -125,7 +139,9 @@ def merge_and_save(official_en_to_cn, history_data, new_crawl_data):
                 rows_to_write.append({
                     "中文名": cn_name,
                     "英文名": en_name,
-                    "序号": item['index'],
+                    "全局序号": item['g_rank'],
+                    "等级": item['tier'],
+                    "等级内序号": item['t_rank'],
                     "海克斯名称": item['name']
                 })
         elif en_name in history_data:

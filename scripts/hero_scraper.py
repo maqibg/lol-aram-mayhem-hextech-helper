@@ -19,6 +19,9 @@ def setup_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # 强制中文环境
+    chrome_options.add_argument("--lang=zh-CN")
+    chrome_options.add_experimental_option('prefs', {'intl.accept_languages': 'zh-CN,zh;q=0.9'})
     chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
     
     service = Service(ChromeDriverManager().install())
@@ -58,28 +61,52 @@ def scrape_single_champion(driver, cn_name, en_name):
                 break
             last_height = new_height
 
-        # 3. 精准提取
-        target_xpath = (
-            "//div[contains(@class, 'AugmentCard')]//span[contains(@class, 'type-caption--bold')] | "
-            "//div[contains(@class, 'augment')]//div[contains(@class, 'info')]//span[contains(@class, 'type-caption--bold')]"
-        )
+        # 3. 按等级提取
+        rarity_blocks = driver.find_elements(By.XPATH, "//div[contains(@class, 'rarity')]")
         
-        elements = driver.find_elements(By.XPATH, target_xpath)
         valid_augments = []
         seen_texts = set()
+        g_rank_counter = 1
         
-        for el in elements:
-            txt = el.text.strip()
-            if not txt or len(txt) < 2: continue
-            if txt in [cn_name, en_name]: continue 
+        # 如果没有找到 rarity 块，可能需要回退到旧版抓取或报错，但根据新截图，会有 rarity 块
+        for block in rarity_blocks:
+            try:
+                # 获取该区块的等级名称
+                tier_name_el = block.find_element(By.XPATH, ".//span[contains(@class, 'rarity-name')]")
+                tier_text = tier_name_el.text.strip()
+                
+                # 根据文本判断是哪种等级
+                tier = "未知"
+                if "棱彩" in tier_text or "Prismatic" in tier_text: tier = "棱彩"
+                elif "金" in tier_text or "Gold" in tier_text: tier = "黄金"
+                elif "银" in tier_text or "Silver" in tier_text: tier = "白银"
+                
+                # 获取该区块下的所有海克斯名字
+                augment_elements = block.find_elements(By.XPATH, ".//span[contains(@class, 'name') and contains(@class, 'type-caption--bold')]")
+                
+                t_rank_counter = 1
+                for el in augment_elements:
+                    txt = el.text.strip()
+                    if not txt or len(txt) < 2: continue
+                    if txt in [cn_name, en_name]: continue 
 
-            if txt not in seen_texts:
-                valid_augments.append(txt)
-                seen_texts.add(txt)
+                    if txt not in seen_texts:
+                        valid_augments.append({
+                            "g_rank": g_rank_counter,
+                            "tier": tier,
+                            "t_rank": t_rank_counter,
+                            "name": txt
+                        })
+                        seen_texts.add(txt)
+                        g_rank_counter += 1
+                        t_rank_counter += 1
+                        
+            except Exception as inner_e:
+                print(f"[{cn_name}] 解析等级区块异常: {inner_e}")
+                continue
 
-        results = [{"index": i, "name": n} for i, n in enumerate(valid_augments, 1)]
-        status_code = "clean" if results else "empty"
-        return results, status_code
+        status_code = "clean" if valid_augments else "empty"
+        return valid_augments, status_code
 
     except Exception as e:
         print(f"[{cn_name}] 异常: {e}")

@@ -13,7 +13,7 @@ import mss
 import keyboard
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from thefuzz import process
+from thefuzz import process, fuzz
 from rapidocr_onnxruntime import RapidOCR
 
 # ================= 配置与常量 =================
@@ -40,7 +40,7 @@ class DataManager:
         self.hero_data = {}
         # 拼音映射改为 defaultdict(list)，支持一个拼音对应多个英雄
         self.pinyin_map = defaultdict(list)
-        self.tier_map = {}
+
         # 动态获取 data 文件夹的绝对路径
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.data_dir = os.path.join(self.base_dir, 'data')
@@ -49,19 +49,7 @@ class DataManager:
     def _load_data(self):
         print("--- 正在加载数据资源 ---")
 
-        # 1. 加载强化符文等级映射
-        tier_file = os.path.join(self.data_dir, 'tiers.json')
-        if os.path.exists(tier_file):
-            try:
-                with open(tier_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                tier_cn_map = {"silver": "白银", "gold": "黄金", "prismatic": "棱彩"}
-                for en_tier, cn_tier in tier_cn_map.items():
-                    if en_tier in data:
-                        for name in data[en_tier]: 
-                            self.tier_map[name] = cn_tier
-            except Exception as e:
-                print(f"⚠️ {tier_file} 加载异常: {e}")
+
 
         # 2. 加载英雄数据 (CSV)
         csv_path = os.path.join(self.data_dir, 'hero_augments.csv')
@@ -79,29 +67,45 @@ class DataManager:
                 raw_hero_list = defaultdict(list)
                 with open(csv_path, 'r', encoding=encoding) as f:
                     reader = csv.reader(f)
-                    next(reader, None) # 跳过表头
+                    header = next(reader, None) # 跳过表头
+                    is_new_format = header and "等级" in header
+                    
                     for row in reader:
-                        if len(row) < 4: continue
+                        if not row: continue
                         hero = row[0].strip()
-                        try: rank = int(row[2])
-                        except: rank = 999
-                        aug = row[3].strip()
-                        raw_hero_list[hero].append((rank, aug))
+                        
+                        if is_new_format and len(row) >= 5:
+                            tier = row[2].strip()
+                            try: t_rank = int(row[3])
+                            except: t_rank = 999
+                            name = row[4].strip()
+                            
+                            if hero not in self.hero_data: self.hero_data[hero] = {}
+                            self.hero_data[hero][name] = {
+                                "tier": tier,
+                                "t_rank": t_rank
+                            }
+                        elif not is_new_format and len(row) >= 4:
+                            try: rank = int(row[2])
+                            except: rank = 999
+                            aug = row[3].strip()
+                            raw_hero_list[hero].append((rank, aug))
                 
-                # 构建查询字典
-                for hero, aug_list in raw_hero_list.items():
-                    aug_list.sort(key=lambda x: x[0])
-                    counters = {"白银": 1, "黄金": 1, "棱彩": 1, "未知": 1}
-                    h_dict = {}
-                    for g_rank, name in aug_list:
-                        tier = self.tier_map.get(name, "未知")
-                        h_dict[name] = {
-                            "g_rank": g_rank, 
-                            "tier": tier, 
-                            "t_rank": counters.get(tier, 1)
-                        }
-                        if tier in counters: counters[tier] += 1
-                    self.hero_data[hero] = h_dict
+                # 如果存在旧格式的数据，走旧的合并逻辑
+                if raw_hero_list:
+                    for hero, aug_list in raw_hero_list.items():
+                        if hero in self.hero_data: continue # 跳过已被新格式处理的
+                        aug_list.sort(key=lambda x: x[0])
+                        counters = {"白银": 1, "黄金": 1, "棱彩": 1, "未知": 1}
+                        h_dict = {}
+                        for rank, name in aug_list:
+                            tier = "未知"
+                            h_dict[name] = {
+                                "tier": tier, 
+                                "t_rank": counters.get(tier, 1)
+                            }
+                            if tier in counters: counters[tier] += 1
+                        self.hero_data[hero] = h_dict
                 
                 print(f"✅ 英雄数据加载完毕: 共 {len(self.hero_data)} 个英雄")
             except Exception as e:
@@ -215,17 +219,20 @@ class GameAnalyzer:
             if txt in hero_augments:
                 match_name = txt
             else:
-                # 2. 模糊匹配
-                match, score = process.extractOne(txt, list(hero_augments.keys()))
-                if score > 50:
+                # 2. 模糊匹配 (使用精确比例 fuzz.ratio，避免子串过分匹配)
+                match, score = process.extractOne(txt, list(hero_augments.keys()), scorer=fuzz.ratio)
+                if score > 60:
                     match_name = match
 
             if match_name:
                 info = hero_augments[match_name]
+                tier = info.get('tier', '?')
+                t_rank = info.get('t_rank', '?')
                 # 格式化显示内容
-                res["text"] = f"【{match_name}】\n{info.get('tier','?')}(No.{info.get('t_rank','?')})\n总No.{info.get('g_rank','?')}"
+                res["text"] = f"【{match_name}】\n{tier} No.{t_rank}"
                 res["valid"] = True
-                res["rank"] = info.get('g_rank', 999)
+                res["tier"] = tier
+                res["t_rank"] = info.get('t_rank', 999)
             else:
                 res["text"] = "❌ 未识别"
                 res["error"] = True
@@ -255,11 +262,19 @@ class GameAnalyzer:
             except Exception as e:
                 print(f"并发任务异常: {e}")
 
-        # 计算最优推荐
+        # 计算最优推荐：等级优先 (棱彩 > 黄金 > 白银 > 未知)，同等级比较 t_rank
+        TIER_PRIORITY = {"棱彩": 0, "黄金": 1, "白银": 2, "未知": 3}
+        
         if valid_matches:
-            min_rank = min(item['rank'] for item in valid_matches)
+            def sort_key(item):
+                tp = TIER_PRIORITY.get(item.get('tier', '未知'), 3)
+                tr = item.get('t_rank', 999)
+                return (tp, tr)
+            
+            best = min(valid_matches, key=sort_key)
+            best_key = sort_key(best)
             for item in valid_matches:
-                if item['rank'] == min_rank:
+                if sort_key(item) == best_key:
                     results[item['key']]["highlight"] = True
         
         return results
@@ -507,10 +522,16 @@ class InputController(threading.Thread):
 # ================= 5. 主入口 =================
 
 def main():
+    import sys
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    
     # 强制设置工作目录为脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     os.system('title ARAM 海克斯助手')
+    os.system('chcp 65001 >nul')
     print(f"Working Directory: {script_dir}")
 
     # 1. 初始化核心数据与逻辑

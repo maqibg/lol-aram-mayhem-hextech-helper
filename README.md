@@ -92,9 +92,9 @@ REGIONS = {
 ## 📂 文件结构说明
 
 * `main.py`: 主程序（GUI 遮罩、按键监听）。
-* `aram_crawler_final.py`: 爬虫脚本（基于 Selenium 抓取数据）。
-* `auto_update_manager.py`: 数据同步工具（合并数据）。
-* `aram_augments_final.csv`: 核心数据库。
+* `hero_scraper.py`: 爬虫脚本（基于 Selenium 抓取数据）。
+* `updater.py`: 数据同步工具（合并数据）。
+* `hero_augments.csv`: 核心数据库。
 
 ## 📄 License
 

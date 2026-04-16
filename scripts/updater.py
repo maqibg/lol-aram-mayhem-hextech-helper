@@ -6,6 +6,7 @@ import os
 import requests
 import sys
 import re
+import random
 from pypinyin import lazy_pinyin 
 
 # 1. 解决同级导入问题
@@ -178,6 +179,63 @@ def merge_and_save(official_en_to_cn, history_data, new_crawl_data):
     if missing_data_champions:
         print(f"\n⚠️ 注意: 有 {len(missing_data_champions)} 个英雄完全没有任何数据: {', '.join(missing_data_champions)}")
 
+# ================= 5. 抽样比对检查 =================
+def compare_hero_data(history_rows, crawled_items):
+    """比对单个英雄的本地历史数据与线上爬取数据，返回是否有差异"""
+    # 将历史数据转为可比较的集合
+    local_set = set()
+    for row in history_rows:
+        key = (row.get('海克斯名称', ''), row.get('等级', ''), str(row.get('总排名', '')), str(row.get('等级内序号', '')))
+        local_set.add(key)
+    
+    # 将爬取数据转为可比较的集合
+    remote_set = set()
+    for item in crawled_items:
+        key = (item['name'], item['tier'], str(item['overall_rank']), str(item['t_rank']))
+        remote_set.add(key)
+    
+    return local_set != remote_set
+
+def spot_check_and_update(official_en_to_cn, history_data, sample_size=3):
+    """随机抽取英雄进行抽样比对，如有差异则触发全量更新"""
+    all_en_names = list(official_en_to_cn.keys())
+    # 优先从有历史数据的英雄中抽样，这样比对才有意义
+    candidates = [en for en in all_en_names if en in history_data]
+    if len(candidates) < sample_size:
+        candidates = all_en_names
+    
+    sampled = random.sample(candidates, min(sample_size, len(candidates)))
+    sample_list = [(official_en_to_cn[en], en) for en in sampled]
+    
+    print(f"\n>>> 🎲 抽样比对: 随机选取 {len(sample_list)} 个英雄进行线上数据校验...")
+    print(f"    抽中: {', '.join([cn for cn, _ in sample_list])}")
+    
+    sample_data, failed = crawler.crawl_champions(sample_list)
+    
+    if failed:
+        print(f"\n⚠️ 抽样爬取失败的英雄: {failed}，无法完成比对。")
+        return False, {}
+    
+    has_diff = False
+    official_cn_to_en = {cn: en for en, cn in official_en_to_cn.items()}
+    
+    for cn_name, crawled_items in sample_data.items():
+        en_name = official_cn_to_en.get(cn_name, cn_name)
+        local_rows = history_data.get(en_name, [])
+        
+        if not local_rows:
+            print(f"    ⚡ [{cn_name}] 本地无数据 → 存在差异")
+            has_diff = True
+            continue
+        
+        if compare_hero_data(local_rows, crawled_items):
+            print(f"    ⚡ [{cn_name}] 数据有变动 → 存在差异")
+            has_diff = True
+        else:
+            print(f"    ✅ [{cn_name}] 数据一致")
+    
+    return has_diff, sample_data
+
 # ================= 主程序 =================
 def main():
     print("=== ARAM 数据自动维护管理器 v8.0 (菜单分离版) ===\n")
@@ -195,6 +253,7 @@ def main():
     print("   [2] 英雄数据：全量更新 (强制重新爬取所有英雄，耗时较长)")
     print("   [3] 英雄数据：极速补漏 (仅爬取本地无数据的英雄)")
     print("   [4] 英雄数据：精确打击 (手动输入指定英雄名称进行更新)")
+    print("   [5] 英雄数据：抽样校验 (随机抽取3个英雄比对，有差异则自动全量更新)")
     
     choice = input("\n请输入选项 (默认1): ").strip()
     if not choice:
@@ -239,6 +298,16 @@ def main():
             else:
                 print(f"   [警告] 找不到对应的英雄: {q}")
         target_list = list(set(target_list))
+    elif choice == '5':
+        # 抽样校验模式
+        has_diff, sample_data = spot_check_and_update(official_en_to_cn, history_data)
+        if has_diff:
+            print("\n🔄 检测到数据差异，自动触发全量更新...")
+            target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
+        else:
+            print("\n✅ 抽样数据与本地一致，无需更新。")
+            # 无需全量爬取，直接用抽样数据更新对应英雄即可
+            new_crawl_data = sample_data
     else: # 默认情况 (选项 1)
         targets = set(new_champs + renamed_champs + missing_champs)
         target_list = [(official_en_to_cn[en], en) for en in targets]
@@ -251,7 +320,7 @@ def main():
         if failed_list:
             print(f"\n⚠️ 本次爬取遭遇失败的英雄: {failed_list}")
             print("    (无需担忧，程序会自动回退保留它们在 CSV 中的旧数据！)")
-    else:
+    elif not new_crawl_data:
         print("\n>>> 检查完毕，没有需要执行英雄爬取任务的目标。")
 
     # 执行合并与保护并写入

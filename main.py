@@ -69,12 +69,29 @@ class DataManager:
                     reader = csv.reader(f)
                     header = next(reader, None) # 跳过表头
                     is_new_format = header and "等级" in header
+                    has_overall_rank = header and "总排名" in header
                     
                     for row in reader:
                         if not row: continue
                         hero = row[0].strip()
                         
-                        if is_new_format and len(row) >= 5:
+                        if has_overall_rank and len(row) >= 6:
+                            # 最新格式: 中文名,英文名,等级,总排名,等级内序号,海克斯名称
+                            tier = row[2].strip()
+                            try: overall_rank = int(row[3])
+                            except: overall_rank = 999
+                            try: t_rank = int(row[4])
+                            except: t_rank = 999
+                            name = row[5].strip()
+                            
+                            if hero not in self.hero_data: self.hero_data[hero] = {}
+                            self.hero_data[hero][name] = {
+                                "tier": tier,
+                                "overall_rank": overall_rank,
+                                "t_rank": t_rank
+                            }
+                        elif is_new_format and len(row) >= 5:
+                            # 旧新格式: 中文名,英文名,等级,等级内序号,海克斯名称 (无总排名)
                             tier = row[2].strip()
                             try: t_rank = int(row[3])
                             except: t_rank = 999
@@ -83,6 +100,7 @@ class DataManager:
                             if hero not in self.hero_data: self.hero_data[hero] = {}
                             self.hero_data[hero][name] = {
                                 "tier": tier,
+                                "overall_rank": 999,
                                 "t_rank": t_rank
                             }
                         elif not is_new_format and len(row) >= 4:
@@ -102,6 +120,7 @@ class DataManager:
                             tier = "未知"
                             h_dict[name] = {
                                 "tier": tier, 
+                                "overall_rank": 999,
                                 "t_rank": counters.get(tier, 1)
                             }
                             if tier in counters: counters[tier] += 1
@@ -228,11 +247,13 @@ class GameAnalyzer:
                 info = hero_augments[match_name]
                 tier = info.get('tier', '?')
                 t_rank = info.get('t_rank', '?')
-                # 格式化显示内容
-                res["text"] = f"【{match_name}】\n{tier} No.{t_rank}"
+                overall_rank = info.get('overall_rank', '?')
+                # 格式化显示内容: 方案A
+                res["text"] = f"【{match_name}】\n总No.{overall_rank} | {tier} No.{t_rank}"
                 res["valid"] = True
                 res["tier"] = tier
                 res["t_rank"] = info.get('t_rank', 999)
+                res["overall_rank"] = info.get('overall_rank', 999)
             else:
                 res["text"] = "❌ 未识别"
                 res["error"] = True
@@ -262,14 +283,15 @@ class GameAnalyzer:
             except Exception as e:
                 print(f"并发任务异常: {e}")
 
-        # 计算最优推荐：等级优先 (棱彩 > 黄金 > 白银 > 未知)，同等级比较 t_rank
+        # 计算最优推荐：总排名优先（越小越好），总排名相同则按等级排序
         TIER_PRIORITY = {"棱彩": 0, "黄金": 1, "白银": 2, "未知": 3}
         
         if valid_matches:
             def sort_key(item):
+                o_rank = item.get('overall_rank', 999)
                 tp = TIER_PRIORITY.get(item.get('tier', '未知'), 3)
                 tr = item.get('t_rank', 999)
-                return (tp, tr)
+                return (o_rank, tp, tr)
             
             best = min(valid_matches, key=sort_key)
             best_key = sort_key(best)

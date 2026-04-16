@@ -29,16 +29,74 @@ def setup_driver():
     return driver
 
 # ==========================================
-# 单个英雄抓取逻辑
+# 从当前页面提取海克斯名称列表（按DOM顺序）
+# ==========================================
+def extract_augment_names(driver):
+    """提取当前Tab下所有海克斯名称，按页面排名顺序返回列表"""
+    names = []
+    try:
+        # 等待列表加载
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "strong.text-sm.text-gray-900"))
+        )
+        time.sleep(0.8)
+        
+        # 滚动加载所有内容（处理懒加载）
+        last_count = 0
+        for _ in range(10):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(0.5)
+            current_count = len(driver.find_elements(By.CSS_SELECTOR, "strong.text-sm.text-gray-900"))
+            if current_count == last_count:
+                break
+            last_count = current_count
+        
+        # 回到顶部
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.3)
+        
+        elements = driver.find_elements(By.CSS_SELECTOR, "strong.text-sm.text-gray-900")
+        for el in elements:
+            txt = el.text.strip()
+            if txt and len(txt) >= 2:
+                names.append(txt)
+    except TimeoutException:
+        print("   > 等待海克斯列表超时")
+    except Exception as e:
+        print(f"   > 提取海克斯名称异常: {e}")
+    return names
+
+# ==========================================
+# 点击指定的 Tab 按钮
+# ==========================================
+def click_tier_tab(driver, tab_text):
+    """点击指定文本的Tab按钮（全部/白银/黄金/棱彩）"""
+    try:
+        buttons = driver.find_elements(By.TAG_NAME, "button")
+        for btn in buttons:
+            if btn.text.strip() == tab_text:
+                driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(1.5)  # 等待内容刷新
+                return True
+        print(f"   > 未找到按钮: {tab_text}")
+        return False
+    except Exception as e:
+        print(f"   > 点击Tab异常 ({tab_text}): {e}")
+        return False
+
+# ==========================================
+# 单个英雄抓取逻辑 (数据源: OP.GG)
 # ==========================================
 def scrape_single_champion(driver, cn_name, en_name):
-    url = f"https://blitz.gg/zh-CN/lol/champions/{en_name}/aram-mayhem"
+    url = f"https://op.gg/zh-cn/lol/modes/aram-mayhem/{en_name}/augments"
     print(f"[{cn_name}] 正在处理: {url}")
     
     try:
         driver.get(url)
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(1.5)
+        time.sleep(2.5)
 
         # 1. 关闭可能的弹窗/Cookie 同意框
         try:
@@ -51,72 +109,63 @@ def scrape_single_champion(driver, cn_name, en_name):
             """)
         except: pass
         
-        # 2. 点击 augments-toggle 按钮展开所有海克斯
-        time.sleep(2)
-        for attempt in range(3):
-            try:
-                toggle_btn = driver.find_element(By.CSS_SELECTOR, "button.augments-toggle")
-                btn_text = toggle_btn.text.strip()
-                print(f"   > 找到按钮: '{btn_text}'")
-                if "显示所有" in btn_text or "Show All" in btn_text:
-                    driver.execute_script("arguments[0].scrollIntoView(true);", toggle_btn)
-                    time.sleep(0.3)
-                    driver.execute_script("arguments[0].click();", toggle_btn)
-                    time.sleep(2)
-                    print(f"   > 已点击展开")
-                break
-            except Exception:
-                # 滚动触发懒加载后重试
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.5)
-                driver.execute_script("window.scrollTo(0, 0);")
-                time.sleep(1)
-        
-        # 3. 滚动加载剩余内容
-        for _ in range(8): 
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
+        time.sleep(1)
 
-        # 3. 按等级提取
-        rarity_blocks = driver.find_elements(By.XPATH, "//div[contains(@class, 'rarity')]")
+        # 2. 点击「全部」Tab，获取总排名
+        print(f"   > 正在提取「全部」排名...")
+        click_tier_tab(driver, "全部")
+        all_names = extract_augment_names(driver)
+        print(f"   > 「全部」共 {len(all_names)} 个海克斯")
         
+        # 构建总排名映射: name -> overall_rank (1-based)
+        overall_rank_map = {}
+        for idx, name in enumerate(all_names, 1):
+            if name not in overall_rank_map:
+                overall_rank_map[name] = idx
+
+        # 3. 依次点击各等级Tab，提取等级内排名
+        tier_data = {}  # name -> {"tier": ..., "t_rank": ...}
+        
+        for tier_name in ["白银", "黄金", "棱彩"]:
+            print(f"   > 正在提取「{tier_name}」排名...")
+            if click_tier_tab(driver, tier_name):
+                tier_names = extract_augment_names(driver)
+                print(f"   > 「{tier_name}」共 {len(tier_names)} 个海克斯")
+                for idx, name in enumerate(tier_names, 1):
+                    if name not in tier_data:
+                        tier_data[name] = {"tier": tier_name, "t_rank": idx}
+            time.sleep(0.5)
+
+        # 4. 合并数据
         valid_augments = []
-        seen_texts = set()
+        seen = set()
         
-        # 如果没有找到 rarity 块，可能需要回退到旧版抓取或报错，但根据新截图，会有 rarity 块
-        for block in rarity_blocks:
-            try:
-                # 获取该区块的等级名称
-                tier_name_el = block.find_element(By.XPATH, ".//span[contains(@class, 'rarity-name')]")
-                tier_text = tier_name_el.text.strip()
-                
-                # 根据文本判断是哪种等级
-                tier = "未知"
-                if "棱彩" in tier_text or "Prismatic" in tier_text: tier = "棱彩"
-                elif "金" in tier_text or "Gold" in tier_text: tier = "黄金"
-                elif "银" in tier_text or "Silver" in tier_text: tier = "白银"
-                
-                # 获取该区块下的所有海克斯名字
-                augment_elements = block.find_elements(By.XPATH, ".//span[contains(@class, 'name') and contains(@class, 'type-caption--bold')]")
-                
-                t_rank_counter = 1
-                for el in augment_elements:
-                    txt = el.text.strip()
-                    if not txt or len(txt) < 2: continue
-                    if txt in [cn_name, en_name]: continue 
-
-                    if txt not in seen_texts:
-                        valid_augments.append({
-                            "tier": tier,
-                            "t_rank": t_rank_counter,
-                            "name": txt
-                        })
-                        seen_texts.add(txt)
-                        t_rank_counter += 1
-                        
-            except Exception as inner_e:
-                print(f"[{cn_name}] 解析等级区块异常: {inner_e}")
+        # 以全部列表为基准，保证每个海克斯都有数据
+        for name in all_names:
+            if name in seen:
                 continue
+            seen.add(name)
+            
+            info = tier_data.get(name, {"tier": "未知", "t_rank": 999})
+            o_rank = overall_rank_map.get(name, 999)
+            
+            valid_augments.append({
+                "name": name,
+                "tier": info["tier"],
+                "overall_rank": o_rank,
+                "t_rank": info["t_rank"]
+            })
+        
+        # 补充只出现在等级Tab但不在「全部」中的海克斯
+        for name, info in tier_data.items():
+            if name not in seen:
+                seen.add(name)
+                valid_augments.append({
+                    "name": name,
+                    "tier": info["tier"],
+                    "overall_rank": 999,
+                    "t_rank": info["t_rank"]
+                })
 
         status_code = "clean" if valid_augments else "empty"
         return valid_augments, status_code
@@ -187,5 +236,5 @@ def crawl_champions(target_list):
 
 if __name__ == "__main__":
     # 测试代码
-    res, fail = crawl_champions([("暗裔剑魔", "Aatrox")])
+    res, fail = crawl_champions([("复仇焰魂", "Brand")])
     print(res)

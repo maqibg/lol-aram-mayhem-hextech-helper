@@ -23,7 +23,7 @@ CHAMPION_ID_FILE = os.path.join(DATA_DIR, "champions.json")
 PINYIN_FILE      = os.path.join(DATA_DIR, "pinyin_map.json")
 CSV_FILE         = os.path.join(DATA_DIR, "hero_augments.csv")
 
-CSV_HEADER       =["中文名", "英文名", "等级", "等级内序号", "海克斯名称"]
+CSV_HEADER       =["中文名", "英文名", "等级", "总排名", "等级内序号", "海克斯名称"]
 
 # ================= 1. 数据真理同步 =================
 def sync_official_data():
@@ -97,6 +97,7 @@ def load_csv_history():
         with open(CSV_FILE, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             is_old_format = reader.fieldnames and "序号" in reader.fieldnames and "等级" not in reader.fieldnames
+            has_overall_rank = reader.fieldnames and "总排名" in reader.fieldnames
             
             for row in reader:
                 en_name = row.get('英文名')
@@ -109,7 +110,19 @@ def load_csv_history():
                             "中文名": row.get("中文名", ""),
                             "英文名": en_name,
                             "等级": "未知",
+                            "总排名": 999,
                             "等级内序号": 999,
+                            "海克斯名称": row.get("海克斯名称", "")
+                        }
+                        history[en_name].append(adapted_row)
+                    elif not has_overall_rank:
+                        # 旧新格式：有等级但无总排名
+                        adapted_row = {
+                            "中文名": row.get("中文名", ""),
+                            "英文名": en_name,
+                            "等级": row.get("等级", "未知"),
+                            "总排名": 999,
+                            "等级内序号": row.get("等级内序号", 999),
                             "海克斯名称": row.get("海克斯名称", "")
                         }
                         history[en_name].append(adapted_row)
@@ -139,6 +152,7 @@ def merge_and_save(official_en_to_cn, history_data, new_crawl_data):
                     "中文名": cn_name,
                     "英文名": en_name,
                     "等级": item['tier'],
+                    "总排名": item['overall_rank'],
                     "等级内序号": item['t_rank'],
                     "海克斯名称": item['name']
                 })

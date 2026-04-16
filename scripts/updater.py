@@ -9,20 +9,31 @@ import re
 import random
 from pypinyin import lazy_pinyin 
 
-# 1. 解决同级导入问题
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
-import hero_scraper as crawler
+# 1. 解决同级导入问题 (兼容直接运行和包导入)
+try:
+    from scripts import hero_scraper as crawler
+except ImportError:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.append(current_dir)
+    import hero_scraper as crawler
 
 
-# 2. 解决路径问题
-BASE_DIR = os.path.dirname(current_dir)
-DATA_DIR = os.path.join(BASE_DIR, 'data')
+# 2. 解决路径问题 (兼容 PyInstaller 打包)
+def _get_data_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.join(os.path.dirname(sys.executable), 'data')
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(current_dir), 'data')
+
+DATA_DIR = _get_data_dir()
 
 # 配置路径
 CHAMPION_ID_FILE = os.path.join(DATA_DIR, "champions.json")
 PINYIN_FILE      = os.path.join(DATA_DIR, "pinyin_map.json")
 CSV_FILE         = os.path.join(DATA_DIR, "hero_augments.csv")
+
+# GitHub 仓库地址 (用于在线下载)
+GITHUB_RAW_BASE  = "https://raw.githubusercontent.com/Nyx0ra/lol-aram-mayhem-hextech-helper/main"
 
 CSV_HEADER       =["中文名", "英文名", "等级", "总排名", "等级内序号", "海克斯名称"]
 
@@ -326,6 +337,115 @@ def main():
     # 执行合并与保护并写入
     merge_and_save(official_en_to_cn, history_data, new_crawl_data)
     print("\n✅ 任务结束。")
+
+
+# ================= GUI API 接口 =================
+
+def run_update(mode='smart', log_func=None):
+    """
+    供 GUI 调用的更新接口。
+    
+    Args:
+        mode: 'smart' | 'full' | 'spot_check'
+        log_func: 日志回调函数 log_func(message: str)
+    
+    Returns:
+        bool: 是否成功
+    """
+    _log = log_func or print
+    
+    try:
+        _log("正在同步官方英雄数据...")
+        official_en_to_cn, official_cn_to_en, new_champs, renamed_champs = sync_official_data()
+        if not official_en_to_cn:
+            _log("❌ 官方数据同步失败")
+            return False
+        
+        _log(f"✅ 同步完成: {len(official_en_to_cn)} 个英雄")
+        update_pinyin_file(official_cn_to_en)
+        _log("✅ 拼音文件已更新")
+        
+        history_data = load_csv_history()
+        missing_champs = [en for en in official_en_to_cn if en not in history_data]
+        target_list = []
+        new_crawl_data = {}
+        
+        if mode == 'full':
+            _log("模式: 全量更新")
+            target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
+        
+        elif mode == 'spot_check':
+            _log("模式: 抽样校验")
+            has_diff, sample_data = spot_check_and_update(official_en_to_cn, history_data)
+            if has_diff:
+                _log("🔄 检测到数据差异，触发全量更新...")
+                target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
+            else:
+                _log("✅ 抽样数据与本地一致")
+                new_crawl_data = sample_data
+        
+        else:  # smart
+            _log("模式: 智能增量")
+            targets = set(new_champs + renamed_champs + missing_champs)
+            target_list = [(official_en_to_cn[en], en) for en in targets]
+        
+        if target_list:
+            _log(f"准备爬取 {len(target_list)} 个英雄...")
+            new_crawl_data, failed_list = crawler.crawl_champions(target_list)
+            if failed_list:
+                _log(f"⚠ 爬取失败的英雄: {', '.join(failed_list)}")
+        elif not new_crawl_data:
+            _log("无需爬取")
+        
+        merge_and_save(official_en_to_cn, history_data, new_crawl_data)
+        _log("✅ 数据合并保存完成")
+        return True
+        
+    except Exception as e:
+        _log(f"❌ 更新失败: {e}")
+        return False
+
+
+def download_from_github(log_func=None):
+    """
+    从 GitHub 仓库下载最新数据文件。
+    
+    Args:
+        log_func: 日志回调函数
+    
+    Returns:
+        bool: 是否全部成功
+    """
+    _log = log_func or print
+    
+    files_to_download = [
+        ("data/hero_augments.csv", CSV_FILE, "英雄海克斯数据"),
+        ("data/champions.json", CHAMPION_ID_FILE, "英雄名称映射"),
+        ("data/pinyin_map.json", PINYIN_FILE, "拼音检索索引"),
+    ]
+    
+    success_count = 0
+    total = len(files_to_download)
+    
+    for remote_path, local_path, desc in files_to_download:
+        url = f"{GITHUB_RAW_BASE}/{remote_path}"
+        _log(f"下载中 [{success_count+1}/{total}]: {desc}...")
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                _log(f"✅ {desc} 下载成功 ({len(resp.content)} bytes)")
+                success_count += 1
+            else:
+                _log(f"❌ {desc} 下载失败 (HTTP {resp.status_code})")
+        except Exception as e:
+            _log(f"❌ {desc} 下载异常: {e}")
+    
+    _log(f"下载完成: {success_count}/{total} 成功")
+    return success_count == total
+
 
 if __name__ == "__main__":
     main()

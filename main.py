@@ -2,6 +2,7 @@ import time
 import json
 import csv
 import os
+import sys
 import threading
 import queue
 import tkinter as tk
@@ -16,6 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from thefuzz import process, fuzz
 from scripts.lcu_connector import LCUConnector
 from rapidocr_onnxruntime import RapidOCR
+
+# ================= 路径兼容 (PyInstaller) =================
+
+def get_base_dir():
+    """获取应用根目录 (兼容 PyInstaller 打包)"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # ================= 配置与常量 =================
 
@@ -42,8 +51,8 @@ class DataManager:
         # 拼音映射改为 defaultdict(list)，支持一个拼音对应多个英雄
         self.pinyin_map = defaultdict(list)
 
-        # 动态获取 data 文件夹的绝对路径
-        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        # 动态获取 data 文件夹的绝对路径 (兼容打包)
+        self.base_dir = get_base_dir()
         self.data_dir = os.path.join(self.base_dir, 'data')
         self._load_data()
 
@@ -622,8 +631,8 @@ def main():
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
     
-    # 强制设置工作目录为脚本所在目录
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # 强制设置工作目录为应用根目录 (兼容打包)
+    script_dir = get_base_dir()
     os.chdir(script_dir)
     os.system('title ARAM 海克斯助手')
     os.system('chcp 65001 >nul')

@@ -10,3 +10,6 @@ thefuzz
 rapidocr_onnxruntime
 tk
 psutil
+pystray
+Pillow
+pyinstaller

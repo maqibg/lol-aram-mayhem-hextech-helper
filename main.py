@@ -480,7 +480,7 @@ class InputController(threading.Thread):
                     self.hide_console_window()
                     return
 
-                # F8 跳过自动检测
+                # F8 跳过自动检测并手动输入
                 if keyboard.is_pressed('f8'):
                     print("\n[F8] 切换至手动输入...")
                     time.sleep(0.5)
@@ -489,10 +489,16 @@ class InputController(threading.Thread):
                 dots = "." * ((attempt % 3) + 1)
                 print(f"\r[Auto] 等待选取英雄{dots}   ", end="", flush=True)
                 time.sleep(2)
+            else:
+                # 30秒后没搜到，不锁在死循环里，直接进入监听模式
+                print("\n[Auto] 暂未自动识别到英雄。将切入后台继续运行。")
+                print(">>> 随时按 [F7] 重新获取，或按 [F8] 呼出控制台手动输入。\n")
+                self.current_hero = None
+                self.queue.put({"cmd": "STATUS", "data": "暂无英雄\n按 F7 自动获取本局英雄"})
+                self.hide_console_window()
+                return
 
-            print("\n[Auto] 未能自动识别，回退至手动输入。\n")
-
-        # ====== 手动输入 (备用) ======
+        # ====== 手动输入 (仅在按下 F8 时，或 LCU 完全异常时进入) ======
         print(">>> 请输入英雄名称 (拼音/中文):")
 
         while True:
@@ -561,6 +567,11 @@ class InputController(threading.Thread):
 
         while not is_selecting:
             if keyboard.is_pressed('f6'):
+                if not self.current_hero:
+                    self.queue.put({"cmd": "STATUS", "data": "⚠ 尚未锁定英雄\n请按 F7 自动获取或 F8 手动输入"})
+                    time.sleep(1)
+                    continue
+                
                 self.queue.put({"cmd": "STATUS", "data": f"🔎 正在分析 [{self.current_hero}]..."})
                 results = self.analyzer.analyze(self.current_hero)
                 self.queue.put({"cmd": "UPDATE", "data": results})

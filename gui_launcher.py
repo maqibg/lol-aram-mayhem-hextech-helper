@@ -16,13 +16,7 @@ import traceback
 
 # ============ 路径初始化 (兼容 PyInstaller 打包) ============
 
-def get_base_dir():
-    """获取应用根目录 (兼容打包与源码运行)"""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-BASE_DIR = get_base_dir()
+from scripts.config import get_base_dir, BASE_DIR
 os.chdir(BASE_DIR)
 sys.path.insert(0, BASE_DIR)
 
@@ -31,6 +25,23 @@ sys.path.insert(0, BASE_DIR)
 import keyboard
 from PIL import Image, ImageDraw
 import pystray
+
+
+# ============ 统一配色方案 ============
+
+class Theme:
+    """GitHub Dark Theme 配色常量 (单一来源)"""
+    BG          = "#0d1117"
+    BG_CARD     = "#161b22"
+    BG_INPUT    = "#0d1117"
+    ACCENT      = "#58a6ff"
+    ACCENT_HVR  = "#79c0ff"
+    SUCCESS     = "#3fb950"
+    WARNING     = "#d29922"
+    ERROR       = "#f85149"
+    TEXT        = "#e6edf3"
+    TEXT_DIM    = "#8b949e"
+    BORDER      = "#30363d"
 
 
 # ================= 日志重定向 =================
@@ -95,23 +106,52 @@ class GUIController(threading.Thread):
         self.gui_queue.put(kwargs)
 
     def _validate_hero(self, name):
-        from thefuzz import process
-        if name in self.dm.hero_data:
-            return name
-        result = process.extractOne(name, list(self.dm.hero_data.keys()))
-        if result and result[1] > 80:
-            return result[0]
-        return None
+        """验证英雄名是否在数据库中，尝试模糊映射"""
+        return self.dm.validate_hero(name)
 
-    def _try_auto_detect(self):
+    def _try_auto_detect(self, verbose=False):
         if not self.lcu:
+            if verbose:
+                print("⚠ LCU 连接器未初始化")
             return None, ""
+        
+        # 先尝试连接
+        if not self.lcu.is_connected():
+            if verbose:
+                print("尝试连接 LCU...")
+            connected = self.lcu.connect()
+            if verbose:
+                if connected:
+                    print(f"✅ LCU 已连接 (端口: {self.lcu.port})")
+                else:
+                    print("⚠ LCU 未连接 (客户端可能未启动或需要管理员权限)")
+        
         hero, source = self.lcu.get_champion_auto()
+        if verbose and not hero:
+            phase = self.lcu.get_gameflow_phase() if self.lcu.is_connected() else None
+            if phase:
+                print(f"   当前阶段: {phase} (未检测到英雄)")
+            else:
+                print("   未获取到游戏阶段信息")
+        
         if hero:
             validated = self._validate_hero(hero)
             if validated:
                 return validated, source
+            elif verbose:
+                print(f"⚠ 英雄 [{hero}] 不在数据库中")
         return None, source
+
+    def set_hero(self, hero_name):
+        """手动设置英雄 (供 GUI 调用)"""
+        validated = self._validate_hero(hero_name)
+        if validated:
+            self.current_hero = validated
+            print(f"✅ 已手动锁定英雄: {validated}")
+            self._gui(event="hero_found", hero=validated, source="手动输入")
+            self.overlay_queue.put({"cmd": "STATUS", "data": f"当前: {validated}\n按 F6 分析"})
+            return validated
+        return None
 
     # ---------- 阶段1: 自动检测英雄 ----------
 
@@ -125,7 +165,9 @@ class GUIController(threading.Thread):
             if not self.running:
                 return
 
-            hero, source = self._try_auto_detect()
+            # 第一次和每5次详细输出
+            verbose = (attempt == 0 or attempt % 5 == 0)
+            hero, source = self._try_auto_detect(verbose=verbose)
             if hero:
                 self.current_hero = hero
                 print(f"✅ 自动识别到英雄: [{hero}] (来源: {source})")
@@ -141,9 +183,10 @@ class GUIController(threading.Thread):
             time.sleep(2)
 
         # 超时未检测到
-        print("暂未检测到英雄，进入后台监听模式")
+        print("暂未检测到英雄，可在上方手动输入英雄名")
+        print("提示: 如果客户端已打开，请尝试以管理员身份运行本程序")
         self._gui(event="status", status="idle")
-        self.overlay_queue.put({"cmd": "STATUS", "data": "暂无英雄\n按 F7 自动获取"})
+        self.overlay_queue.put({"cmd": "STATUS", "data": "暂无英雄\n按 F7 或手动输入"})
 
     # ---------- 阶段2: 热键监听 ----------
 
@@ -265,23 +308,235 @@ class TrayManager:
         self.app.gui_queue.put({"event": "tray_quit"})
 
 
+# ================= 更新选项对话框 =================
+
+class UpdateDialog:
+    """数据更新选项对话框"""
+
+    BG       = Theme.BG
+    BG_CARD  = Theme.BG_CARD
+    ACCENT   = Theme.ACCENT
+    SUCCESS  = Theme.SUCCESS
+    TEXT     = Theme.TEXT
+    TEXT_DIM = Theme.TEXT_DIM
+    BORDER   = Theme.BORDER
+    WARNING  = Theme.WARNING
+
+    def __init__(self, app):
+        self.app = app
+        self.dlg = tk.Toplevel(app.root)
+        self.dlg.title("数据更新")
+        self.dlg.configure(bg=self.BG)
+        self.dlg.transient(app.root)
+        self.dlg.grab_set()
+
+        # 设置图标
+        icon_path = os.path.join(BASE_DIR, 'assets', 'icon.ico')
+        if os.path.exists(icon_path):
+            self.dlg.iconbitmap(icon_path)
+
+        self._build_ui()
+
+        # 强制完成所有子组件渲染，精确获取自身需要的高度
+        self.dlg.update()
+        w = max(440, self.dlg.winfo_reqwidth())
+        min_h = self.dlg.winfo_reqheight()
+        
+        x = app.root.winfo_x() + (app.root.winfo_width() - w) // 2
+        y = app.root.winfo_y() + (app.root.winfo_height() - min_h) // 2
+        
+        self.dlg.geometry(f"{w}x{min_h}+{x}+{y}")
+        # 在设定好绝对尺寸后再禁用缩放，防止 Windows 过早锁死窗口尺寸导致元素被截住
+        self.dlg.resizable(False, False)
+
+    def _build_ui(self):
+        main = tk.Frame(self.dlg, bg=self.BG, padx=24, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        # 标题
+        tk.Label(main, text="选择更新方式", font=("Microsoft YaHei", 16, "bold"),
+                 fg=self.TEXT, bg=self.BG).pack(anchor="w", pady=(0, 4))
+
+        # ---- 爬虫选项区 ----
+        tk.Label(main, text="🌐 本地爬虫更新 (需要 Chrome 浏览器)",
+                 font=("Microsoft YaHei", 9), fg=self.WARNING,
+                 bg=self.BG).pack(anchor="w", pady=(8, 6))
+
+        self._option_row(main,
+            icon="🔍", title="抽样校验", tag="推荐",
+            desc="随机3英雄比对，有差异自动全量更新",
+            command=lambda: self._select('spot_check'))
+
+        self._option_row(main,
+            icon="🧠", title="智能增量", tag=None,
+            desc="自动爬取新英雄 + 改名英雄 + 缺失英雄",
+            command=lambda: self._select('smart'))
+
+        self._option_row(main,
+            icon="🔄", title="全量更新", tag=None,
+            desc="强制重爬所有英雄，耗时较长",
+            command=lambda: self._select('full'))
+
+        self._option_row(main,
+            icon="🎯", title="精确更新", tag=None,
+            desc="手动指定英雄名称进行更新",
+            command=self._precise_input)
+
+        # ---- 分隔线 ----
+        sep_frame = tk.Frame(main, bg=self.BG, pady=8)
+        sep_frame.pack(fill=tk.X)
+        tk.Frame(sep_frame, bg=self.BORDER, height=1).pack(fill=tk.X)
+
+        # ---- GitHub 下载 ----
+        tk.Label(main, text="📦 在线下载 (无需浏览器)",
+                 font=("Microsoft YaHei", 9), fg=self.TEXT_DIM,
+                 bg=self.BG).pack(anchor="w", pady=(0, 6))
+
+        self._option_row(main,
+            icon="📥", title="GitHub 下载", tag=None,
+            desc="从仓库下载预处理数据 (取决于仓库更新时间)",
+            command=lambda: self._select('github'))
+
+        # ---- 底部: 帮助按钮 ----
+        bottom = tk.Frame(main, bg=self.BG)
+        bottom.pack(fill=tk.X, pady=(8, 0))
+
+        help_btn = tk.Label(bottom, text=" ？", font=("Microsoft YaHei", 12, "bold"),
+                            fg=self.TEXT_DIM, bg=self.BG, cursor="hand2",
+                            width=3, relief=tk.FLAT,
+                            highlightbackground=self.BORDER, highlightthickness=1)
+        help_btn.pack(side=tk.RIGHT)
+        help_btn.bind("<Enter>", lambda e: help_btn.config(fg=self.ACCENT))
+        help_btn.bind("<Leave>", lambda e: help_btn.config(fg=self.TEXT_DIM))
+        help_btn.bind("<Button-1>", lambda e: self._show_help())
+
+    def _option_row(self, parent, icon, title, tag, desc, command):
+        """创建一个可点击的选项行"""
+        row = tk.Frame(parent, bg=self.BG_CARD, cursor="hand2",
+                       highlightbackground=self.BORDER, highlightthickness=1)
+        row.pack(fill=tk.X, pady=(0, 6))
+
+        inner = tk.Frame(row, bg=self.BG_CARD, padx=14, pady=10)
+        inner.pack(fill=tk.X)
+
+        # 标题行
+        title_row = tk.Frame(inner, bg=self.BG_CARD)
+        title_row.pack(fill=tk.X)
+
+        tk.Label(title_row, text=f"{icon}  {title}",
+                 font=("Microsoft YaHei", 11, "bold"),
+                 fg=self.TEXT, bg=self.BG_CARD).pack(side=tk.LEFT)
+
+        if tag:
+            tag_frame = tk.Frame(title_row, bg=self.ACCENT, padx=6, pady=1)
+            tag_frame.pack(side=tk.RIGHT)
+            tk.Label(tag_frame, text=tag, font=("Microsoft YaHei", 8),
+                     fg="white", bg=self.ACCENT).pack()
+
+        # 描述
+        tk.Label(inner, text=desc, font=("Microsoft YaHei", 9),
+                 fg=self.TEXT_DIM, bg=self.BG_CARD, anchor="w").pack(fill=tk.X, pady=(2, 0))
+
+        # 绑定点击事件到所有子组件
+        def _on_enter(e):
+            row.config(highlightbackground=self.ACCENT)
+        def _on_leave(e):
+            row.config(highlightbackground=self.BORDER)
+        def _on_click(e):
+            command()
+
+        for widget in [row, inner, title_row] + list(inner.winfo_children()) + list(title_row.winfo_children()):
+            widget.bind("<Enter>", _on_enter)
+            widget.bind("<Leave>", _on_leave)
+            widget.bind("<Button-1>", _on_click)
+
+    def _select(self, mode):
+        """选择更新模式并关闭对话框"""
+        self.dlg.destroy()
+        self.app._run_update(mode)
+
+    def _precise_input(self):
+        """精确更新: 弹出输入框"""
+        input_dlg = tk.Toplevel(self.dlg)
+        input_dlg.title("精确更新 - 输入英雄名")
+        input_dlg.geometry("360x150")
+        input_dlg.resizable(False, False)
+        input_dlg.configure(bg=self.BG)
+        input_dlg.transient(self.dlg)
+        input_dlg.grab_set()
+
+        frame = tk.Frame(input_dlg, bg=self.BG, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(frame, text="输入英雄名称 (多个用逗号分隔)",
+                 font=("Microsoft YaHei", 10), fg=self.TEXT,
+                 bg=self.BG).pack(anchor="w", pady=(0, 8))
+
+        entry = tk.Entry(frame, font=("Microsoft YaHei", 11),
+                         bg=self.BG_CARD, fg=self.TEXT,
+                         insertbackground=self.TEXT,
+                         highlightbackground=self.BORDER,
+                         highlightthickness=1, relief=tk.FLAT, borderwidth=6)
+        entry.pack(fill=tk.X, pady=(0, 12))
+        entry.focus_set()
+
+        def _submit():
+            names = [n.strip() for n in entry.get().split(",") if n.strip()]
+            if names:
+                input_dlg.destroy()
+                self.dlg.destroy()
+                self.app._run_update('precise', hero_names=names)
+
+        entry.bind("<Return>", lambda e: _submit())
+
+        ttk.Button(frame, text="开始更新", style='Accent.TButton',
+                   command=_submit).pack(fill=tk.X)
+
+    def _show_help(self):
+        """显示帮助信息"""
+        help_text = (
+            "📖 更新方式说明\n\n"
+            "━━ 本地爬虫 (需要 Chrome) ━━\n\n"
+            "🔍 抽样校验 [推荐]\n"
+            "  从所有英雄中随机选取3个，爬取最新数据与本地\n"
+            "  比对。如果发现差异，自动触发全量更新。\n"
+            "  适合游戏版本更新后快速检测数据是否过期。\n\n"
+            "🧠 智能增量\n"
+            "  自动检测并爬取: 新出的英雄、近期改名的英雄、\n"
+            "  以及本地缺失数据的英雄。不会重复爬取已有数据。\n\n"
+            "🔄 全量更新\n"
+            "  强制重新爬取全部英雄的海克斯数据。\n"
+            "  耗时较长 (约10-20分钟)，适合数据严重过期时使用。\n\n"
+            "🎯 精确更新\n"
+            "  手动输入英雄名称 (支持中文名/英文名)，\n"
+            "  仅更新指定英雄的数据。\n\n"
+            "━━ 在线下载 (无需 Chrome) ━━\n\n"
+            "📥 GitHub 下载\n"
+            "  从项目仓库直接下载预处理好的数据文件。\n"
+            "  ⚠ 注意: 仓库数据由开发者手动更新推送，\n"
+            "  时效性不一定能保证。如果需要最新数据，\n"
+            "  建议优先使用爬虫方式。"
+        )
+        messagebox.showinfo("更新方式说明", help_text, parent=self.dlg)
+
+
 # ================= 主 GUI 应用 =================
 
 class LauncherApp:
     """ARAM 海克斯助手 - 主界面"""
 
-    # 配色方案 (GitHub Dark Theme)
-    BG          = "#0d1117"
-    BG_CARD     = "#161b22"
-    BG_INPUT    = "#0d1117"
-    ACCENT      = "#58a6ff"
-    ACCENT_HVR  = "#79c0ff"
-    SUCCESS     = "#3fb950"
-    WARNING     = "#d29922"
-    ERROR       = "#f85149"
-    TEXT        = "#e6edf3"
-    TEXT_DIM    = "#8b949e"
-    BORDER      = "#30363d"
+    # 配色方案 (引用统一主题)
+    BG          = Theme.BG
+    BG_CARD     = Theme.BG_CARD
+    BG_INPUT    = Theme.BG_INPUT
+    ACCENT      = Theme.ACCENT
+    ACCENT_HVR  = Theme.ACCENT_HVR
+    SUCCESS     = Theme.SUCCESS
+    WARNING     = Theme.WARNING
+    ERROR       = Theme.ERROR
+    TEXT        = Theme.TEXT
+    TEXT_DIM    = Theme.TEXT_DIM
+    BORDER      = Theme.BORDER
 
     FONT_TITLE  = ("Microsoft YaHei", 18, "bold")
     FONT_SUB    = ("Microsoft YaHei", 10)
@@ -421,7 +676,7 @@ class LauncherApp:
         # ---- 状态卡片 ----
         card = tk.Frame(main, bg=self.BG_CARD, padx=20, pady=16,
                         highlightbackground=self.BORDER, highlightthickness=1)
-        card.pack(fill=tk.X, pady=(0, 16))
+        card.pack(fill=tk.X, pady=(0, 8))
 
         # 英雄行
         hero_row = tk.Frame(card, bg=self.BG_CARD)
@@ -444,6 +699,28 @@ class LauncherApp:
                                      font=self.FONT_STATUS, fg=self.TEXT_DIM,
                                      bg=self.BG_CARD)
         self.status_label.pack(side=tk.RIGHT)
+
+        # ---- 手动输入英雄 ----
+        manual_frame = tk.Frame(main, bg=self.BG, pady=4)
+        manual_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.hero_entry = tk.Entry(manual_frame, font=("Microsoft YaHei", 11),
+                                   bg=self.BG_CARD, fg=self.TEXT,
+                                   insertbackground=self.TEXT,
+                                   highlightbackground=self.BORDER,
+                                   highlightthickness=1, relief=tk.FLAT,
+                                   borderwidth=6)
+        self.hero_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.hero_entry.insert(0, "输入英雄名/拼音...")
+        self.hero_entry.config(fg=self.TEXT_DIM)
+        self.hero_entry.bind("<FocusIn>", self._on_entry_focus_in)
+        self.hero_entry.bind("<FocusOut>", self._on_entry_focus_out)
+        self.hero_entry.bind("<Return>", lambda e: self._manual_set_hero())
+
+        self.manual_btn = ttk.Button(manual_frame, text="锁定",
+                                     style='Secondary.TButton',
+                                     command=self._manual_set_hero)
+        self.manual_btn.pack(side=tk.RIGHT)
 
         # ---- 热键提示 ----
         hotkey_frame = tk.Frame(main, bg=self.BG)
@@ -472,19 +749,11 @@ class LauncherApp:
                                     style='Danger.TButton', command=self._stop_engine)
         # 停止按钮初始隐藏
 
-        # 更新按钮行
-        update_row = tk.Frame(btn_frame, bg=self.BG)
-        update_row.pack(fill=tk.X, pady=(0, 8))
-        update_row.columnconfigure(0, weight=1)
-        update_row.columnconfigure(1, weight=1)
-
-        self.crawl_btn = ttk.Button(update_row, text="🔄 爬虫更新",
-                                     style='Secondary.TButton', command=self._update_crawler)
-        self.crawl_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-
-        self.dl_btn = ttk.Button(update_row, text="📥 在线下载",
-                                  style='Secondary.TButton', command=self._download_github)
-        self.dl_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        # 数据更新按钮
+        self.update_btn = ttk.Button(btn_frame, text="📦  数据更新",
+                                     style='Secondary.TButton',
+                                     command=self._show_update_dialog)
+        self.update_btn.pack(fill=tk.X, pady=(0, 8))
 
         # 托盘按钮
         self.tray_btn = ttk.Button(btn_frame, text="最小化到系统托盘",
@@ -638,53 +907,42 @@ class LauncherApp:
     # 数据更新
     # ==========================================
 
-    def _update_crawler(self):
-        """使用爬虫更新数据"""
-        if not messagebox.askyesno("爬虫更新",
-                "爬虫更新需要安装 Chrome 浏览器。\n"
-                "更新过程可能需要数分钟，期间请勿关闭程序。\n\n"
-                "确定要开始吗？"):
-            return
+    def _show_update_dialog(self):
+        """显示更新选项对话框"""
+        UpdateDialog(self)
 
-        self.crawl_btn.config(state=tk.DISABLED)
-        self.dl_btn.config(state=tk.DISABLED)
-        self._log("🔄 开始爬虫更新...")
+    def _run_update(self, mode, hero_names=None):
+        """执行更新操作 (后台线程)"""
+        self.update_btn.config(state=tk.DISABLED)
+
+        mode_labels = {
+            'spot_check': '🔍 抽样校验',
+            'smart':      '🧠 智能增量',
+            'full':       '🔄 全量更新',
+            'precise':    '🎯 精确更新',
+            'github':     '📥 GitHub 下载',
+        }
+        self._log(f"{mode_labels.get(mode, mode)} 开始...")
 
         def _run():
             try:
-                from scripts.updater import run_update
-                success = run_update(mode='spot_check', log_func=self._log_safe)
+                if mode == 'github':
+                    from scripts.updater import download_from_github
+                    success = download_from_github(log_func=self._log_safe)
+                elif mode == 'precise' and hero_names:
+                    from scripts.updater import update_specific_heroes
+                    success = update_specific_heroes(hero_names, log_func=self._log_safe)
+                else:
+                    from scripts.updater import run_update
+                    success = run_update(mode=mode, log_func=self._log_safe)
+
                 if success:
-                    self._log("✅ 爬虫更新完成!")
-                    # 重新加载数据
+                    self._log("✅ 更新完成!")
                     self.gui_queue.put({"event": "reload_data"})
                 else:
                     self._log("⚠ 更新完成 (部分失败)")
             except Exception as e:
-                self._log(f"❌ 爬虫更新失败: {e}")
-                traceback.print_exc()
-            finally:
-                self.gui_queue.put({"event": "update_done"})
-
-        threading.Thread(target=_run, daemon=True).start()
-
-    def _download_github(self):
-        """从 GitHub 下载最新数据"""
-        self.crawl_btn.config(state=tk.DISABLED)
-        self.dl_btn.config(state=tk.DISABLED)
-        self._log("📥 正在从 GitHub 下载最新数据...")
-
-        def _run():
-            try:
-                from scripts.updater import download_from_github
-                success = download_from_github(log_func=self._log_safe)
-                if success:
-                    self._log("✅ 数据下载完成!")
-                    self.gui_queue.put({"event": "reload_data"})
-                else:
-                    self._log("❌ 下载失败")
-            except Exception as e:
-                self._log(f"❌ 下载失败: {e}")
+                self._log(f"❌ 更新失败: {e}")
                 traceback.print_exc()
             finally:
                 self.gui_queue.put({"event": "update_done"})
@@ -796,12 +1054,59 @@ class LauncherApp:
             self._quit_app()
 
         elif event == "update_done":
-            self.crawl_btn.config(state=tk.NORMAL)
-            self.dl_btn.config(state=tk.NORMAL)
+            self.update_btn.config(state=tk.NORMAL)
 
         elif event == "reload_data":
             self._log("重新加载数据...")
             self._load_data()
+
+    # ==========================================
+    # 手动英雄输入
+    # ==========================================
+
+    def _on_entry_focus_in(self, event):
+        if self.hero_entry.get() == "输入英雄名/拼音...":
+            self.hero_entry.delete(0, tk.END)
+            self.hero_entry.config(fg=self.TEXT)
+
+    def _on_entry_focus_out(self, event):
+        if not self.hero_entry.get().strip():
+            self.hero_entry.insert(0, "输入英雄名/拼音...")
+            self.hero_entry.config(fg=self.TEXT_DIM)
+
+    def _manual_set_hero(self):
+        """手动输入英雄名并锁定"""
+        query = self.hero_entry.get().strip()
+        if not query or query == "输入英雄名/拼音...":
+            return
+
+        if not self.dm or not self.dm.hero_data:
+            self._log("❌ 数据未加载")
+            return
+
+        # 搜索英雄
+        matches, is_exact = self.dm.search_hero(query)
+
+        if not matches:
+            self._log(f"❌ 未找到英雄: {query}")
+            return
+
+        # 取第一个匹配
+        hero_name = matches[0]
+
+        # 如果控制器正在运行，通过控制器设置
+        if self.controller and self.engine_running:
+            result = self.controller.set_hero(hero_name)
+            if result:
+                self._log(f"✅ 已锁定: {result}")
+                self.hero_entry.delete(0, tk.END)
+                self.hero_entry.insert(0, "输入英雄名/拼音...")
+                self.hero_entry.config(fg=self.TEXT_DIM)
+                self.root.focus()
+            else:
+                self._log(f"❌ 英雄 [{hero_name}] 不在数据库中")
+        else:
+            self._log(f"⚠ 请先点击「开始识别」")
 
     # ==========================================
     # UI 辅助方法
@@ -890,6 +1195,15 @@ class LauncherApp:
 
 # ================= 入口点 =================
 
+def _check_admin():
+    """检查是否以管理员身份运行"""
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
 def main():
     try:
         # 高 DPI 适配
@@ -898,6 +1212,32 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
+
+        # 管理员权限检查
+        if not _check_admin():
+            # 非管理员: 弹出提示但仍允许运行
+            import ctypes
+            result = messagebox.askyesno(
+                "权限提示",
+                "⚠ 当前未以管理员身份运行。\n\n"
+                "以下功能可能无法正常工作:\n"
+                "• 自动识别英雄联盟客户端\n"
+                "• 全局热键 (F6/F7/F8)\n\n"
+                "点击「是」以管理员身份重新启动\n"
+                "点击「否」继续以普通用户运行"
+            )
+            if result:
+                # 以管理员重启
+                try:
+                    exe = sys.executable
+                    ctypes.windll.shell32.ShellExecuteW(
+                        None, "runas", exe,
+                        " ".join(sys.argv) if getattr(sys, 'frozen', False) else f'"{sys.argv[0]}"',
+                        None, 1
+                    )
+                    sys.exit(0)
+                except Exception:
+                    pass  # 用户取消 UAC, 继续普通运行
 
         app = LauncherApp()
         app.run()

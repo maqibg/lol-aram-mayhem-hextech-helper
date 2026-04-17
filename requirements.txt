@@ -3,7 +3,6 @@ webdriver-manager
 requests
 pypinyin
 numpy
-opencv-python
 mss
 keyboard
 thefuzz

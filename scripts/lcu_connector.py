@@ -39,6 +39,9 @@ COMMON_INSTALL_PATHS = [
 class LCUConnector:
     """英雄联盟客户端 LCU API 连接器（全生命周期）"""
 
+    LCU_TIMEOUT = 3       # LCU API 请求超时 (秒)
+    LIVE_API_TIMEOUT = 2  # Live Client Data API 超时 (秒)
+
     def __init__(self, champions_json_path):
         self.port = None
         self.auth_token = None
@@ -140,7 +143,7 @@ class LCUConnector:
             resp = requests.request(
                 method, f"{self.base_url}{endpoint}",
                 auth=('riot', self.auth_token),
-                verify=False, timeout=3, **kwargs
+                verify=False, timeout=self.LCU_TIMEOUT, **kwargs
             )
             return resp
         except requests.exceptions.ConnectionError:
@@ -274,7 +277,7 @@ class LCUConnector:
         try:
             resp = requests.get(
                 'https://127.0.0.1:2999/liveclientdata/activeplayer',
-                verify=False, timeout=2
+                verify=False, timeout=self.LIVE_API_TIMEOUT
             )
             if resp.status_code == 200:
                 en_name = resp.json().get('championName', '')

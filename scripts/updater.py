@@ -12,25 +12,16 @@ from pypinyin import lazy_pinyin
 # 1. 解决同级导入问题 (兼容直接运行和包导入)
 try:
     from scripts import hero_scraper as crawler
+    from scripts.config import DATA_DIR, CHAMPION_ID_FILE, PINYIN_FILE, CSV_FILE
 except ImportError:
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.append(current_dir)
+    parent_dir = os.path.dirname(current_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
     import hero_scraper as crawler
-
-
-# 2. 解决路径问题 (兼容 PyInstaller 打包)
-def _get_data_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.join(os.path.dirname(sys.executable), 'data')
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(os.path.dirname(current_dir), 'data')
-
-DATA_DIR = _get_data_dir()
-
-# 配置路径
-CHAMPION_ID_FILE = os.path.join(DATA_DIR, "champions.json")
-PINYIN_FILE      = os.path.join(DATA_DIR, "pinyin_map.json")
-CSV_FILE         = os.path.join(DATA_DIR, "hero_augments.csv")
+    from scripts.config import DATA_DIR, CHAMPION_ID_FILE, PINYIN_FILE, CSV_FILE
 
 # GitHub 仓库地址 (用于在线下载)
 GITHUB_RAW_BASE  = "https://raw.githubusercontent.com/Nyx0ra/lol-aram-mayhem-hextech-helper/main"
@@ -247,9 +238,9 @@ def spot_check_and_update(official_en_to_cn, history_data, sample_size=3):
     
     return has_diff, sample_data
 
-# ================= 主程序 =================
+# ================= 主程序 (命令行入口) =================
 def main():
-    print("=== ARAM 数据自动维护管理器 v8.0 (菜单分离版) ===\n")
+    print("=== ARAM 数据自动维护管理器 v8.1 ===\n")
 
     # 1. 自动执行基础设施同步（每次必执行，速度很快）
     official_en_to_cn, official_cn_to_en, new_champs, renamed_champs = sync_official_data()
@@ -270,84 +261,35 @@ def main():
     if not choice:
         choice = '1'
 
-    # --- 分支 B：执行英雄海克斯爬取任务 (1, 2, 3, 4) ---
-    
-    # 必须要加载历史数据来保护旧数据
-    history_data = load_csv_history()
-    missing_champs = [en for en in official_en_to_cn if en not in history_data]
-    target_list =[] 
+    official_data = (official_en_to_cn, official_cn_to_en, new_champs, renamed_champs)
 
-    if choice == '2':
-        target_list =[(cn, en) for en, cn in official_en_to_cn.items()]
-    elif choice == '3':
-        target_list = [(official_en_to_cn[en], en) for en in missing_champs]
-    elif choice == '4':
+    if choice == '4':
+        # 精确打击：手动输入英雄名
         user_input = input("请输入要更新的英雄名、拼音缩写或英文ID (多个用逗号或空格分隔): ").strip()
-        query_names = re.split(r'[,，\s]+', user_input)
-        
-        # 加载拼音映射用于缩写匹配
-        pinyin_data = {}
-        try:
-            if os.path.exists(PINYIN_FILE):
-                with open(PINYIN_FILE, 'r', encoding='utf-8') as f:
-                    pinyin_data = json.load(f)
-        except Exception: 
-            pass
-
-        for q in query_names:
-            if not q: continue
-            matched_en = None
-            q_lower = q.lower()
-            for en, cn in official_en_to_cn.items():
-                py_init = pinyin_data.get(cn, "")
-                # 匹配：英文全称 / 中文全称 / 拼音全缩写 (精确匹配)
-                if q_lower == en.lower() or q == cn or q_lower == py_init:
-                    matched_en = en
-                    break
-            if matched_en:
-                target_list.append((official_en_to_cn[matched_en], matched_en))
-            else:
-                print(f"   [警告] 找不到对应的英雄: {q}")
-        target_list = list(set(target_list))
-    elif choice == '5':
-        # 抽样校验模式
-        has_diff, sample_data = spot_check_and_update(official_en_to_cn, history_data)
-        if has_diff:
-            print("\n🔄 检测到数据差异，自动触发全量更新...")
-            target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
+        names = [n.strip() for n in re.split(r'[,，\s]+', user_input) if n.strip()]
+        if names:
+            update_specific_heroes(names)
         else:
-            print("\n✅ 抽样数据与本地一致，无需更新。")
-            # 无需全量爬取，直接用抽样数据更新对应英雄即可
-            new_crawl_data = sample_data
-    else: # 默认情况 (选项 1)
-        targets = set(new_champs + renamed_champs + missing_champs)
-        target_list = [(official_en_to_cn[en], en) for en in targets]
+            print("未输入有效英雄名")
+    else:
+        mode_map = {'1': 'smart', '2': 'full', '3': 'patch', '5': 'spot_check'}
+        mode = mode_map.get(choice, 'smart')
+        run_update(mode=mode, official_data=official_data)
 
-    new_crawl_data = {}
-    if target_list:
-        print(f"\n>>> 准备爬取 {len(target_list)} 个目标英雄...")
-        new_crawl_data, failed_list = crawler.crawl_champions(target_list)
-        
-        if failed_list:
-            print(f"\n⚠️ 本次爬取遭遇失败的英雄: {failed_list}")
-            print("    (无需担忧，程序会自动回退保留它们在 CSV 中的旧数据！)")
-    elif not new_crawl_data:
-        print("\n>>> 检查完毕，没有需要执行英雄爬取任务的目标。")
-
-    # 执行合并与保护并写入
-    merge_and_save(official_en_to_cn, history_data, new_crawl_data)
     print("\n✅ 任务结束。")
 
 
 # ================= GUI API 接口 =================
 
-def run_update(mode='smart', log_func=None):
+def run_update(mode='smart', log_func=None, official_data=None):
     """
-    供 GUI 调用的更新接口。
+    供 GUI 和 CLI 调用的统一更新接口。
     
     Args:
-        mode: 'smart' | 'full' | 'spot_check'
+        mode: 'smart' | 'full' | 'patch' | 'spot_check'
         log_func: 日志回调函数 log_func(message: str)
+        official_data: (英文到中文, 中文到英文, 新英雄, 改名英雄) 元组，
+                       如已提前同步可传入避免重复请求
     
     Returns:
         bool: 是否成功
@@ -355,21 +297,26 @@ def run_update(mode='smart', log_func=None):
     _log = log_func or print
     
     try:
-        _log("正在同步官方英雄数据...")
-        official_en_to_cn, official_cn_to_en, new_champs, renamed_champs = sync_official_data()
-        if not official_en_to_cn:
-            _log("❌ 官方数据同步失败")
-            return False
+        # 1. 同步官方数据 (或使用已有数据)
+        if official_data:
+            official_en_to_cn, official_cn_to_en, new_champs, renamed_champs = official_data
+        else:
+            _log("正在同步官方英雄数据...")
+            official_en_to_cn, official_cn_to_en, new_champs, renamed_champs = sync_official_data()
+            if not official_en_to_cn:
+                _log("❌ 官方数据同步失败")
+                return False
+            _log(f"✅ 同步完成: {len(official_en_to_cn)} 个英雄")
+            update_pinyin_file(official_cn_to_en)
+            _log("✅ 拼音文件已更新")
         
-        _log(f"✅ 同步完成: {len(official_en_to_cn)} 个英雄")
-        update_pinyin_file(official_cn_to_en)
-        _log("✅ 拼音文件已更新")
-        
+        # 2. 加载历史数据
         history_data = load_csv_history()
         missing_champs = [en for en in official_en_to_cn if en not in history_data]
         target_list = []
         new_crawl_data = {}
         
+        # 3. 根据模式构建目标列表
         if mode == 'full':
             _log("模式: 全量更新")
             target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
@@ -384,11 +331,16 @@ def run_update(mode='smart', log_func=None):
                 _log("✅ 抽样数据与本地一致")
                 new_crawl_data = sample_data
         
+        elif mode == 'patch':
+            _log("模式: 极速补漏")
+            target_list = [(official_en_to_cn[en], en) for en in missing_champs]
+        
         else:  # smart
             _log("模式: 智能增量")
             targets = set(new_champs + renamed_champs + missing_champs)
             target_list = [(official_en_to_cn[en], en) for en in targets]
         
+        # 4. 执行爬取
         if target_list:
             _log(f"准备爬取 {len(target_list)} 个英雄...")
             new_crawl_data, failed_list = crawler.crawl_champions(target_list)
@@ -397,6 +349,7 @@ def run_update(mode='smart', log_func=None):
         elif not new_crawl_data:
             _log("无需爬取")
         
+        # 5. 合并保存
         merge_and_save(official_en_to_cn, history_data, new_crawl_data)
         _log("✅ 数据合并保存完成")
         return True
@@ -445,6 +398,79 @@ def download_from_github(log_func=None):
     
     _log(f"下载完成: {success_count}/{total} 成功")
     return success_count == total
+
+
+def update_specific_heroes(hero_names, log_func=None):
+    """
+    精确更新指定英雄的数据。
+    
+    Args:
+        hero_names: 英雄名称列表 (中文或英文)
+        log_func: 日志回调函数
+    
+    Returns:
+        bool: 是否成功
+    """
+    _log = log_func or print
+    
+    try:
+        _log("正在同步官方英雄数据...")
+        official_en_to_cn, official_cn_to_en, _, _ = sync_official_data()
+        if not official_en_to_cn:
+            _log("❌ 官方数据同步失败")
+            return False
+        
+        # 解析英雄名 (支持中文和英文)
+        target_list = []
+        for name in hero_names:
+            name = name.strip()
+            if name in official_cn_to_en:
+                # 中文名
+                en = official_cn_to_en[name]
+                target_list.append((name, en))
+                _log(f"  ✓ {name} ({en})")
+            elif name in official_en_to_cn:
+                # 英文名
+                cn = official_en_to_cn[name]
+                target_list.append((cn, name))
+                _log(f"  ✓ {cn} ({name})")
+            else:
+                # 模糊匹配
+                from thefuzz import process
+                result_cn = process.extractOne(name, list(official_cn_to_en.keys()))
+                result_en = process.extractOne(name, list(official_en_to_cn.keys()))
+                best = max([r for r in [result_cn, result_en] if r], key=lambda x: x[1])
+                if best and best[1] > 60:
+                    matched = best[0]
+                    if matched in official_cn_to_en:
+                        en = official_cn_to_en[matched]
+                        target_list.append((matched, en))
+                        _log(f"  ✓ {matched} ({en}) [模糊匹配 '{name}']")
+                    else:
+                        cn = official_en_to_cn[matched]
+                        target_list.append((cn, matched))
+                        _log(f"  ✓ {cn} ({matched}) [模糊匹配 '{name}']")
+                else:
+                    _log(f"  ✗ 未找到: {name}")
+        
+        if not target_list:
+            _log("❌ 没有有效的英雄")
+            return False
+        
+        _log(f"准备爬取 {len(target_list)} 个英雄...")
+        history_data = load_csv_history()
+        new_crawl_data, failed_list = crawler.crawl_champions(target_list)
+        
+        if failed_list:
+            _log(f"⚠ 爬取失败: {', '.join(failed_list)}")
+        
+        merge_and_save(official_en_to_cn, history_data, new_crawl_data)
+        _log("✅ 精确更新完成")
+        return True
+        
+    except Exception as e:
+        _log(f"❌ 更新失败: {e}")
+        return False
 
 
 if __name__ == "__main__":

@@ -9,22 +9,15 @@ import tkinter as tk
 import ctypes
 import msvcrt  # 用于清除输入缓冲区
 import numpy as np
-import cv2
+from PIL import Image
 import mss
 import keyboard
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from thefuzz import process, fuzz
+from scripts.config import BASE_DIR, DATA_DIR
 from scripts.lcu_connector import LCUConnector
 from rapidocr_onnxruntime import RapidOCR
-
-# ================= 路径兼容 (PyInstaller) =================
-
-def get_base_dir():
-    """获取应用根目录 (兼容 PyInstaller 打包)"""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
 
 # ================= 配置与常量 =================
 
@@ -51,9 +44,8 @@ class DataManager:
         # 拼音映射改为 defaultdict(list)，支持一个拼音对应多个英雄
         self.pinyin_map = defaultdict(list)
 
-        # 动态获取 data 文件夹的绝对路径 (兼容打包)
-        self.base_dir = get_base_dir()
-        self.data_dir = os.path.join(self.base_dir, 'data')
+        self.base_dir = BASE_DIR
+        self.data_dir = DATA_DIR
         self._load_data()
 
     def _load_data(self):
@@ -69,10 +61,6 @@ class DataManager:
         else:
             try:
                 encoding = 'utf-8-sig'
-                try:
-                    with open(csv_path, 'r', encoding=encoding) as f: f.read(100)
-                except UnicodeDecodeError:
-                    encoding = 'gbk'
                 
                 raw_hero_list = defaultdict(list)
                 with open(csv_path, 'r', encoding=encoding) as f:
@@ -89,9 +77,9 @@ class DataManager:
                             # 最新格式: 中文名,英文名,等级,总排名,等级内序号,海克斯名称
                             tier = row[2].strip()
                             try: overall_rank = int(row[3])
-                            except: overall_rank = 999
+                            except (ValueError, IndexError): overall_rank = 999
                             try: t_rank = int(row[4])
-                            except: t_rank = 999
+                            except (ValueError, IndexError): t_rank = 999
                             name = row[5].strip()
                             
                             if hero not in self.hero_data: self.hero_data[hero] = {}
@@ -104,7 +92,7 @@ class DataManager:
                             # 旧新格式: 中文名,英文名,等级,等级内序号,海克斯名称 (无总排名)
                             tier = row[2].strip()
                             try: t_rank = int(row[3])
-                            except: t_rank = 999
+                            except (ValueError, IndexError): t_rank = 999
                             name = row[4].strip()
                             
                             if hero not in self.hero_data: self.hero_data[hero] = {}
@@ -115,7 +103,7 @@ class DataManager:
                             }
                         elif not is_new_format and len(row) >= 4:
                             try: rank = int(row[2])
-                            except: rank = 999
+                            except (ValueError, IndexError): rank = 999
                             aug = row[3].strip()
                             raw_hero_list[hero].append((rank, aug))
                 
@@ -169,35 +157,38 @@ class DataManager:
         
         # 2. 如果没找到，在数据Key中模糊搜索
         if self.hero_data:
-            guess, score = process.extractOne(query, list(self.hero_data.keys()))
-            if score > 60:
-                return [guess], False
+            result = process.extractOne(query, list(self.hero_data.keys()))
+            if result and result[1] > 60:
+                return [result[0]], False
 
-        return[], False
+        return [], False
+
+    def validate_hero(self, name, threshold=80):
+        """验证英雄名是否在数据库中，尝试模糊映射"""
+        if name in self.hero_data:
+            return name
+        if not self.hero_data:
+            return None
+        result = process.extractOne(name, list(self.hero_data.keys()))
+        if result and result[1] > threshold:
+            return result[0]
+        return None
 
 # ================= 2. 图像分析 (Core Logic) =================
 
 class GameAnalyzer:
-    """负责 OCR 和 图像处理 (解决线程安全问题)"""
+    """负责 OCR 和 图像处理"""
+    TIER_PRIORITY = {"棱彩": 0, "黄金": 1, "白银": 2, "未知": 3}
+
     def __init__(self, data_manager):
         self.dm = data_manager
         # OCR 引擎是线程安全的
         self.ocr = RapidOCR(use_angle_cls=False)
-        # 线程局部存储：解决 mss 在多线程下的崩溃问题
-        self._thread_local = threading.local()
         # 线程池
         self.executor = ThreadPoolExecutor(max_workers=3)
 
-    @property
-    def sct(self):
-        """获取当前线程专用的 mss 实例"""
-        if not hasattr(self._thread_local, "instance"):
-            self._thread_local.instance = mss.mss()
-        return self._thread_local.instance
-
     def capture_region(self, region):
         try:
-            # 必须转换为 int，防止浮点数导致 mss 报错
             monitor = {
                 "top": int(region["top"]),
                 "left": int(region["left"]),
@@ -205,11 +196,14 @@ class GameAnalyzer:
                 "height": int(region["height"]),
                 "mon": 0
             }
-            img = np.array(self.sct.grab(monitor))
-            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-            h, w = gray.shape
+            with mss.mss() as sct:
+                raw = sct.grab(monitor)
+            img = Image.frombytes("RGB", raw.size, raw.rgb)
+            gray = img.convert("L")
+            w, h = gray.size
             # 2倍上采样提高文字清晰度
-            return cv2.resize(gray, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+            resized = gray.resize((w * 2, h * 2), Image.BICUBIC)
+            return np.array(resized)
         except Exception as e:
             print(f"截图失败: {e}")
             return None
@@ -294,12 +288,10 @@ class GameAnalyzer:
                 print(f"并发任务异常: {e}")
 
         # 计算最优推荐：总排名优先（越小越好），总排名相同则按等级排序
-        TIER_PRIORITY = {"棱彩": 0, "黄金": 1, "白银": 2, "未知": 3}
-        
         if valid_matches:
             def sort_key(item):
                 o_rank = item.get('overall_rank', 999)
-                tp = TIER_PRIORITY.get(item.get('tier', '未知'), 3)
+                tp = self.TIER_PRIORITY.get(item.get('tier', '未知'), 3)
                 tr = item.get('t_rank', 999)
                 return (o_rank, tp, tr)
             
@@ -429,6 +421,9 @@ class InputController(threading.Thread):
         self.analyzer = analyzer
         self.lcu = lcu_connector
         self.current_hero = None
+        self._last_f6 = 0
+        self._last_f7 = 0
+        self._last_f8 = 0
 
     def run(self):
         while True:
@@ -442,12 +437,7 @@ class InputController(threading.Thread):
 
     def _validate_hero(self, name):
         """验证英雄名是否在数据库中，尝试模糊映射"""
-        if name in self.dm.hero_data:
-            return name
-        real_name, score = process.extractOne(name, list(self.dm.hero_data.keys()))
-        if score > 80:
-            return real_name
-        return None
+        return self.dm.validate_hero(name)
 
     def _try_auto_detect(self):
         """使用 LCU 统一接口自动获取英雄，返回 (英雄中文名|None, 来源)"""
@@ -571,22 +561,23 @@ class InputController(threading.Thread):
 
     def listening_phase(self):
         self.flush_input()
-        is_selecting = False
         print(f"[监听中...] 当前英雄: {self.current_hero} | F6分析 / F7刷新 / F8手动")
 
-        while not is_selecting:
-            if keyboard.is_pressed('f6'):
+        while True:
+            now = time.time()
+
+            if keyboard.is_pressed('f6') and now - self._last_f6 > 1.0:
+                self._last_f6 = now
                 if not self.current_hero:
                     self.queue.put({"cmd": "STATUS", "data": "⚠ 尚未锁定英雄\n请按 F7 自动获取或 F8 手动输入"})
-                    time.sleep(1)
                     continue
                 
                 self.queue.put({"cmd": "STATUS", "data": f"🔎 正在分析 [{self.current_hero}]..."})
                 results = self.analyzer.analyze(self.current_hero)
                 self.queue.put({"cmd": "UPDATE", "data": results})
-                time.sleep(1)
 
-            if keyboard.is_pressed('f7'):
+            if keyboard.is_pressed('f7') and now - self._last_f7 > 1.0:
+                self._last_f7 = now
                 # F7: 全阶段刷新英雄 (ChampSelect / InProgress / LiveAPI)
                 self.queue.put({"cmd": "STATUS", "data": "刷新英雄..."})
                 hero, source = self._try_auto_detect()
@@ -599,11 +590,11 @@ class InputController(threading.Thread):
                     self.queue.put({"cmd": "STATUS", "data": f"当前英雄: {hero}\n按 F6 分析"})
                 else:
                     self.queue.put({"cmd": "STATUS", "data": f"当前: {self.current_hero}\n按 F6 分析"})
-                time.sleep(1)
 
-            if keyboard.is_pressed('f8'):
-                is_selecting = True
+            if keyboard.is_pressed('f8') and now - self._last_f8 > 1.0:
+                self._last_f8 = now
                 time.sleep(0.5)
+                return  # 退出监听，回到 select_hero_phase
 
             time.sleep(0.05)
 
@@ -612,31 +603,31 @@ class InputController(threading.Thread):
     def show_console_window():
         try:
             hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW
+            ctypes.windll.user32.ShowWindow(hwnd, 5)  # SW_SHOW
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except: pass
+        except Exception:
+            pass
 
     @staticmethod
     def hide_console_window():
         try:
             hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE
-        except: pass
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        except Exception:
+            pass
 
 # ================= 5. 主入口 =================
 
 def main():
-    import sys
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
     
     # 强制设置工作目录为应用根目录 (兼容打包)
-    script_dir = get_base_dir()
-    os.chdir(script_dir)
+    os.chdir(BASE_DIR)
     os.system('title ARAM 海克斯助手')
     os.system('chcp 65001 >nul')
-    print(f"Working Directory: {script_dir}")
+    print(f"Working Directory: {BASE_DIR}")
 
     # 1. 初始化核心数据与逻辑
     dm = DataManager()

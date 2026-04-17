@@ -7,6 +7,8 @@ import subprocess
 import shutil
 import os
 import sys
+import time
+import glob
 
 
 APP_NAME = "ARAMHelper"
@@ -36,6 +38,7 @@ def check_dependencies():
 
 def build():
     """执行 PyInstaller 打包"""
+    global DIST_DIR
     print(f"\n{'='*50}")
     print(f"  打包 {APP_NAME}")
     print(f"  入口: {ENTRY_POINT}")
@@ -56,23 +59,38 @@ def build():
         "zmq", "tornado",
         "lib2to3", "blib2to3",
         "nacl", "cloudpickle",
-        "onnxruntime.transformers",  # 这个子包依赖 torch
+        "cv2",                          # opencv 已用 Pillow 替代
+        "onnxruntime.transformers",      # 这个子包依赖 torch
     ]
 
+    # 使用唯一的时间戳生成一个新的分发父目录, 彻底避开旧目录的文件锁定
+    timestamp = int(time.time())
+    unique_dist = os.path.join("dist", f"build_{timestamp}")
+    DIST_DIR = os.path.join(unique_dist, APP_NAME)
+
+    # 构建命令
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--onedir",
         "--noconsole",
+        "--uac-admin",           # 默认请求管理员权限
         "--name", APP_NAME,
         "--noconfirm",       # 不确认覆盖
         "--clean",           # 清理缓存
-
+        "--distpath", unique_dist,
+        
         # 收集 rapidocr 完整包 (含 ONNX 模型)
         "--collect-all", "rapidocr_onnxruntime",
+
+        # numpy: 完整收集 (Anaconda 环境需要)
+        "--collect-all", "numpy",
 
         # onnxruntime: 只收集数据文件和二进制, 不收集子模块 (避免拖入 torch)
         "--collect-data", "onnxruntime",
         "--collect-binaries", "onnxruntime",
+
+        # 运行时 hook: 修复 numpy 冻结环境检测
+        "--runtime-hook", os.path.join("runtime_hooks", "fix_numpy.py"),
 
         # 隐式导入
         "--hidden-import", "pystray._win32",
@@ -98,6 +116,8 @@ def build():
     if os.path.exists(ICON_PATH):
         cmd.insert(-1, "--icon")
         cmd.insert(-1, ICON_PATH)
+
+    # (原预清理逻辑已经上移)
 
     print("执行命令:")
     print(" ".join(cmd))
@@ -151,23 +171,90 @@ def cleanup_bloat():
     print("\n--- 清理不必要的大型文件 ---")
 
     patterns = [
+        # CUDA / TensorRT (不需要, 仅用 CPU 推理)
         "onnxruntime/capi/onnxruntime_providers_cuda*",
         "onnxruntime/capi/onnxruntime_providers_tensorrt*",
         "nvinfer*", "nvcuda*", "cudnn*", "cublas*",
         "cufft*", "curand*", "cusparse*", "cusolver*",
-        "mkl_*.dll",
+        # MKL MPI 相关 (不需要)
+        "mkl_blacs_*.dll",
+        "mkl_cdft_*.dll",
+        "mkl_scalapack_*.dll",
+        "mkl_pgi_thread*.dll",
+        "mkl_tbb_thread*.dll",
+        "mkl_msg.dll",
+        # 不需要的 MKL 微架构变体 (保留 mkl_core, mkl_rt, mkl_def, mkl_intel_thread)
+        "mkl_avx.2.dll",
+        "mkl_avx2.2.dll",
+        "mkl_avx512.2.dll",
+        "mkl_mc.2.dll",
+        "mkl_mc3.2.dll",
+        "mkl_vml_avx.2.dll",
+        "mkl_vml_avx2.2.dll",
+        "mkl_vml_avx512.2.dll",
+        "mkl_vml_mc.2.dll",
+        "mkl_vml_mc3.2.dll",
+        # OpenCV ffmpeg (不需要视频) 及残留 cv2 文件
         "cv2/opencv_videoio_ffmpeg*",
+        "cv2/**",
+        # onnxruntime training 相关
+        "onnxruntime/training/**",
+        # numpy 文档和 f2py
+        "numpy/f2py/**",
+        "numpy/doc/**",
+        # selenium 不需要的浏览器驱动
+        "selenium/webdriver/firefox/**",
+        "selenium/webdriver/edge/**",
+        "selenium/webdriver/safari/**",
     ]
 
     freed = 0
     for pat in patterns:
         for f in glob.glob(os.path.join(internal, pat)):
             sz = os.path.getsize(f)
-            freed += sz
-            os.remove(f)
+            for attempt in range(5):
+                try:
+                    if os.path.isfile(f):
+                        os.remove(f)
+                    elif os.path.isdir(f):
+                        shutil.rmtree(f, ignore_errors=True)
+                    freed += sz
+                    break
+                except PermissionError:
+                    time.sleep(1)
+            else:
+                print(f"⚠ 无法删除文件 (已被锁定): {f}")
 
     if freed > 0:
         print(f"✅ 已清理 {freed / 1024 / 1024:.0f} MB 不必要的文件 (CUDA/MKL/ffmpeg)")
+
+    # 清理 numpy 内部的 setup.py (防止"source directory"误检测)
+    numpy_dir = os.path.join(internal, "numpy")
+    if os.path.exists(numpy_dir):
+        count = 0
+        for root, dirs, files in os.walk(numpy_dir):
+            for f in files:
+                if f in ('setup.py', 'setup.cfg'):
+                    full_p = os.path.join(root, f)
+                    for attempt in range(5):
+                        try:
+                            os.remove(full_p)
+                            count += 1
+                            break
+                        except PermissionError:
+                            time.sleep(1)
+            # 也删除 tests 目录减小体积
+            if 'tests' in dirs:
+                full_test_dir = os.path.join(root, 'tests')
+                for attempt in range(5):
+                    try:
+                        shutil.rmtree(full_test_dir, ignore_errors=True)
+                        break
+                    except Exception:
+                        time.sleep(1)
+                dirs.remove('tests')
+        if count > 0:
+            print(f"✅ 已清理 numpy 内部 {count} 个 setup 文件")
 
 
 def print_summary():

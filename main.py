@@ -21,11 +21,18 @@ from rapidocr_onnxruntime import RapidOCR
 
 # ================= 配置与常量 =================
 
-REGIONS = {
-    "hex_1": {'top': 540, 'left': 650,  'width': 320, 'height': 60},
-    "hex_2": {'top': 540, 'left': 1130, 'width': 320, 'height': 60},
-    "hex_3": {'top': 540, 'left': 1600, 'width': 320, 'height': 60}
-}
+def get_regions():
+    """根据当前屏幕分辨率动态计算海克斯文字截取区域 (以 2K 2560x1440 为基准等比缩放)"""
+    with mss.mss() as sct:
+        mon = sct.monitors[1]  # 主显示器
+        W, H = mon['width'], mon['height']
+    return {
+        "hex_1": {'top': int(H * 0.375),  'left': int(W * 0.2539), 'width': int(W * 0.125), 'height': int(H * 0.0417)},
+        "hex_2": {'top': int(H * 0.375),  'left': int(W * 0.4414), 'width': int(W * 0.125), 'height': int(H * 0.0417)},
+        "hex_3": {'top': int(H * 0.375),  'left': int(W * 0.625),  'width': int(W * 0.125), 'height': int(H * 0.0417)},
+    }
+
+REGIONS = get_regions()
 
 COLORS = {
     "normal": "#00FF00",  # 绿色

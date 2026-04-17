@@ -59,7 +59,6 @@ def build():
         "zmq", "tornado",
         "lib2to3", "blib2to3",
         "nacl", "cloudpickle",
-        "cv2",                          # opencv 已用 Pillow 替代
         "onnxruntime.transformers",      # 这个子包依赖 torch
     ]
 
@@ -194,9 +193,8 @@ def cleanup_bloat():
         "mkl_vml_avx512.2.dll",
         "mkl_vml_mc.2.dll",
         "mkl_vml_mc3.2.dll",
-        # OpenCV ffmpeg (不需要视频) 及残留 cv2 文件
+        # OpenCV ffmpeg (不需要视频)
         "cv2/opencv_videoio_ffmpeg*",
-        "cv2/**",
         # onnxruntime training 相关
         "onnxruntime/training/**",
         # numpy 文档和 f2py

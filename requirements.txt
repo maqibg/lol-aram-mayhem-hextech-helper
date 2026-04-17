@@ -3,6 +3,7 @@ webdriver-manager
 requests
 pypinyin
 numpy
+opencv-python-headless
 mss
 keyboard
 thefuzz

@@ -21,7 +21,7 @@ except ImportError:
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
     import hero_scraper as crawler
-    from scripts.config import DATA_DIR, CHAMPION_ID_FILE, PINYIN_FILE, CSV_FILE
+    from config import DATA_DIR, CHAMPION_ID_FILE, PINYIN_FILE, CSV_FILE
 
 # GitHub 仓库地址 (用于在线下载)
 GITHUB_RAW_BASE  = "https://raw.githubusercontent.com/Nyx0ra/lol-aram-mayhem-hextech-helper/main"
@@ -160,7 +160,8 @@ def merge_and_save(official_en_to_cn, history_data, new_crawl_data):
                     "海克斯名称": item['name']
                 })
         elif en_name in history_data:
-            rows_to_write = history_data[en_name]
+            # 深拷贝避免修改原始 history_data
+            rows_to_write = [dict(row) for row in history_data[en_name]]
             for row in rows_to_write:
                 row['中文名'] = cn_name
         else:
@@ -215,8 +216,8 @@ def spot_check_and_update(official_en_to_cn, history_data, sample_size=3):
     sample_data, failed = crawler.crawl_champions(sample_list)
     
     if failed:
-        print(f"\n⚠️ 抽样爬取失败的英雄: {failed}，无法完成比对。")
-        return False, {}
+        print(f"\n⚠️ 抽样爬取失败的英雄: {failed}，跳过失败英雄继续比对。")
+        # 不丢弃已成功的数据，只跳过失败的
     
     has_diff = False
     official_cn_to_en = {cn: en for en, cn in official_en_to_cn.items()}
@@ -328,8 +329,8 @@ def run_update(mode='smart', log_func=None, official_data=None):
                 _log("🔄 检测到数据差异，触发全量更新...")
                 target_list = [(cn, en) for en, cn in official_en_to_cn.items()]
             else:
-                _log("✅ 抽样数据与本地一致")
-                new_crawl_data = sample_data
+                _log("✅ 抽样数据与本地一致，无需更新")
+                return True
         
         elif mode == 'patch':
             _log("模式: 极速补漏")
@@ -380,9 +381,9 @@ def download_from_github(log_func=None):
     success_count = 0
     total = len(files_to_download)
     
-    for remote_path, local_path, desc in files_to_download:
+    for idx, (remote_path, local_path, desc) in enumerate(files_to_download, 1):
         url = f"{GITHUB_RAW_BASE}/{remote_path}"
-        _log(f"下载中 [{success_count+1}/{total}]: {desc}...")
+        _log(f"下载中 [{idx}/{total}]: {desc}...")
         try:
             resp = requests.get(url, timeout=30)
             if resp.status_code == 200:
@@ -436,22 +437,26 @@ def update_specific_heroes(hero_names, log_func=None):
                 _log(f"  ✓ {cn} ({name})")
             else:
                 # 模糊匹配
-                from thefuzz import process
-                result_cn = process.extractOne(name, list(official_cn_to_en.keys()))
-                result_en = process.extractOne(name, list(official_en_to_cn.keys()))
-                best = max([r for r in [result_cn, result_en] if r], key=lambda x: x[1])
-                if best and best[1] > 60:
-                    matched = best[0]
-                    if matched in official_cn_to_en:
-                        en = official_cn_to_en[matched]
-                        target_list.append((matched, en))
-                        _log(f"  ✓ {matched} ({en}) [模糊匹配 '{name}']")
+                try:
+                    from thefuzz import process
+                    result_cn = process.extractOne(name, list(official_cn_to_en.keys()))
+                    result_en = process.extractOne(name, list(official_en_to_cn.keys()))
+                    candidates = [r for r in [result_cn, result_en] if r]
+                    best = max(candidates, key=lambda x: x[1]) if candidates else None
+                    if best and best[1] > 60:
+                        matched = best[0]
+                        if matched in official_cn_to_en:
+                            en = official_cn_to_en[matched]
+                            target_list.append((matched, en))
+                            _log(f"  ✓ {matched} ({en}) [模糊匹配 '{name}']")
+                        else:
+                            cn = official_en_to_cn[matched]
+                            target_list.append((cn, matched))
+                            _log(f"  ✓ {cn} ({matched}) [模糊匹配 '{name}']")
                     else:
-                        cn = official_en_to_cn[matched]
-                        target_list.append((cn, matched))
-                        _log(f"  ✓ {cn} ({matched}) [模糊匹配 '{name}']")
-                else:
-                    _log(f"  ✗ 未找到: {name}")
+                        _log(f"  ✗ 未找到: {name}")
+                except ImportError:
+                    _log(f"  ✗ 未找到: {name} (提示: 安装 thefuzz 可启用模糊匹配)")
         
         if not target_list:
             _log("❌ 没有有效的英雄")

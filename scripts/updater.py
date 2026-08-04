@@ -42,6 +42,8 @@ def sync_official_data():
         official_en_to_cn = {}
         official_cn_to_en = {}
         for en_id, info in data.items():
+            if en_id.startswith('Jade_'):
+                continue
             cn_name = info['name']
             official_en_to_cn[en_id] = cn_name
             official_cn_to_en[cn_name] = en_id

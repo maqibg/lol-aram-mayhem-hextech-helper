@@ -54,10 +54,16 @@
     cd lol-aram-mayhem-hextech-helper
     ```
 
-2.  **安装依赖**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+2.  **创建环境与安装依赖**:
+    * **推荐方式 (使用 `uv`，自动隔离并配置 Python 3.12)**:
+      ```bash
+      uv venv --python 3.12
+      uv pip install -r requirements.txt
+      ```
+    * **传统方式 (`pip`)**:
+      ```bash
+      pip install -r requirements.txt
+      ```
 
 > [!WARNING]
 > **Python 版本要求**：本项目依赖的 `rapidocr_onnxruntime` 仅支持 **Python 3.9 ~ 3.12**。使用 Python 3.13+ 会导致 OCR 引擎初始化报错 (`KeyError: 'model_path'`)。请使用 [Python 3.12](https://www.python.org/downloads/release/python-3129/) 或更低版本。
@@ -98,6 +104,10 @@
 1. **准备环境**：请确保已依照上述“安装指南”克隆了代码仓库，并在本地配置好的 Python 环境内安装了 `requirements.txt`。
 2. **启动程序**：右键点击你的 IDE终端或 CMD，选择 **“以管理员身份运行”**，执行全新的图形可视化客户端：
    ```bash
+   # uv 方式 (推荐)
+   uv run python gui_launcher.py
+
+   # 传统方式
    python gui_launcher.py
    ```
 3. **数据更新 (四维自动爬虫化)**：
